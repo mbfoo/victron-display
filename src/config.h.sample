@@ -1,0 +1,11 @@
+#pragma once
+
+#define CONFIG_WIFI_SSID "myssid"
+#define CONFIG_WIFI_PASSWORD "mypassword"
+#define CONFIG_BMS_BLE_NAME "xiaoxiang_bms"
+#define CONFIG_MQTT_SERVER "hostname"
+#define CONFIG_MQTT_TOPIC "xiaoxiang_bms"
+#define CONFIG_MAX_CHARGE_SOC 80
+#define CONFIG_SOC_LIMIT_ENABLED false
+#define CONFIG_AP_NAME "bms-ap"
+#define CONFIG_AP_PASSWORD "123456789"

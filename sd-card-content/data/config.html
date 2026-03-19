@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BMS Configuration</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0F172A;
+    color: #F1F5F9;
+    font-family: system-ui, -apple-system, sans-serif;
+    padding: 0 0 40px;
+  }
+  .hdr {
+    padding: 12px 16px;
+    background: #1E293B;
+    border-bottom: 1px solid #334155;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  .hdr a { color: #64748B; font-size: 18px; text-decoration: none; }
+  .hdr h1 { font-size: 15px; font-weight: 600; }
+  .wrap { max-width: 520px; margin: 0 auto; padding: 16px; }
+  .card {
+    background: #1E293B;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 14px;
+  }
+  .card h2 {
+    font-size: 12px;
+    font-weight: 700;
+    color: #64748B;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    margin-bottom: 12px;
+  }
+  label {
+    display: block;
+    font-size: 13px;
+    color: #94A3B8;
+    margin-bottom: 3px;
+    margin-top: 10px;
+  }
+  label:first-of-type { margin-top: 0; }
+  input[type=text],
+  input[type=password],
+  input[type=number],
+  select {
+    display: block;
+    width: 100%;
+    min-width: 0;        /* prevents overflow in grid/flex */
+    padding: 9px 11px;
+    background: #0F172A;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    color: #F1F5F9;
+    font-size: 14px;
+    appearance: none;
+    -webkit-appearance: none;
+  }
+  input:focus, select:focus { outline: none; border-color: #38BDF8; }
+  .hint { font-size: 11px; color: #475569; margin-top: 4px; line-height: 1.5; }
+  .row { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
+  .row label { margin: 0; flex: 1; }
+  .toggle { position: relative; width: 44px; height: 24px; flex: none; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute;
+    inset: 0;
+    background: #334155;
+    border-radius: 12px;
+    cursor: pointer;
+    transition: .2s;
+  }
+  .slider::before {
+    content: '';
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    left: 3px;
+    bottom: 3px;
+    background: #64748B;
+    border-radius: 50%;
+    transition: .2s;
+  }
+  input:checked + .slider { background: #22C55E; }
+  input:checked + .slider::before { transform: translateX(20px); background: #fff; }
+  .save-btn {
+    width: 100%;
+    padding: 13px;
+    background: #38BDF8;
+    color: #0F172A;
+    border: none;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+    margin-top: 6px;
+  }
+  .save-btn:active { opacity: .8; }
+  #status {
+    text-align: center;
+    font-size: 13px;
+    padding: 10px;
+    border-radius: 6px;
+    margin-top: 10px;
+    display: none;
+  }
+  #status.ok  { background: #14532D; color: #86EFAC; display: block; }
+  #status.err { background: #7F1D1D; color: #FCA5A5; display: block; }
+  .loading { text-align: center; padding: 40px; color: #475569; }
+
+  /* WiFi profile grid */
+  .profile-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    align-items: end;
+    padding-bottom: 10px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid #334155;
+  }
+  .profile-row:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+  .profile-num {
+    grid-column: 1 / -1;
+    font-size: 11px;
+    color: #475569;
+    margin-bottom: 2px;
+  }
+  .profile-row label { margin-top: 0; }
+</style>
+
+</head>
+<body>
+<div class="hdr">
+  <a href="/" title="Back">&#8592;</a>
+  <h1>Configuration</h1>
+</div>
+<div class="wrap">
+  <div class="loading" id="loading">Loading configuration...</div>
+  <form id="form" style="display:none">
+
+    <!-- WiFi Profiles -->
+    <div class="card">
+      <h2>WiFi Networks (up to 10)</h2>
+      <div class="hint" style="margin-bottom:12px">Leave password blank to keep existing. Clear SSID to remove a profile.</div>
+      <div id="wifi-profiles">
+        <!-- dynamically built by JS -->
+      </div>
+    </div>
+
+    <!-- AP Mode -->
+    <div class="card">
+      <h2>Soft AP (Fallback)</h2>
+      <div class="row">
+        <label>Enable AP mode</label>
+        <label class="toggle"><input type="checkbox" name="apEnabled" id="apEnabled"><span class="slider"></span></label>
+      </div>
+      <label>AP SSID</label>
+      <input type="text" name="apSsid" autocomplete="off">
+      <label>AP Password</label>
+      <input type="password" name="apPassword" placeholder="unchanged">
+    </div>
+
+    <!-- BMS -->
+    <div class="card">
+      <h2>BMS Connection</h2>
+      <label>Device name (BLE advertised name)</label>
+      <input type="text" name="bmsDeviceName">
+      <label>Poll interval (ms)</label>
+      <input type="number" name="bmsPollInterval" min="1000" max="60000" step="500">
+    </div>
+
+    <!-- MQTT -->
+    <div class="card">
+      <h2>MQTT</h2>
+      <div class="row">
+        <label>Enable MQTT</label>
+        <label class="toggle"><input type="checkbox" name="mqttEnabled" id="mqttEnabled"><span class="slider"></span></label>
+      </div>
+      <label>Server (hostname / IP)</label>
+      <input type="text" name="mqttServer">
+      <label>Port</label>
+      <input type="number" name="mqttPort" min="1" max="65535">
+      <label>Topic</label>
+      <input type="text" name="mqttTopic">
+      <label>Publish interval (s)</label>
+      <input type="number" name="mqttInterval" min="5" max="3600">
+    </div>
+
+    <!-- SOC Limiter -->
+    <div class="card">
+      <h2>Charge Limit</h2>
+      <div class="row">
+        <label>Enable SOC limiter</label>
+        <label class="toggle"><input type="checkbox" name="socLimitEnabled" id="socLimitEnabled"><span class="slider"></span></label>
+      </div>
+      <label>Maximum charge SOC (%)</label>
+      <input type="number" name="socLimitMax" min="10" max="100">
+      <div class="hint">Charge FET is cut at this SOC and restored at <span id="resumeHint"></span>% (−3% hysteresis).</div>
+    </div>
+
+    <!-- Display -->
+    <div class="card">
+      <h2>Display</h2>
+      <label>Display timeout</label>
+      <select name="displayTimeout" style="width:100%;padding:9px 11px;background:#0F172A;border:1px solid #334155;border-radius:6px;color:#F1F5F9;font-size:14px">
+        <option value="0">Never (always on)</option>
+        <option value="60">1 minute</option>
+        <option value="600">10 minutes</option>
+        <option value="3600">1 hour</option>
+        <option value="86400">24 hours</option>
+      </select>
+    </div>
+
+    <!-- Estimator -->
+    <div class="card">
+      <h2>Current Filter</h2>
+      <label>Time constant tau (seconds, 1–600)</label>
+      <input type="number" name="estTau" min="1" max="600" step="1" oninput="updateAlpha(this.value)">
+      <div class="hint">Low (5–15s): fast response. High (60–120s): smooth time-remaining.<br>
+        Alpha at 1s poll: <span id="alphaHint"></span></div>
+    </div>
+
+    <button type="submit" class="save-btn">Save &amp; Apply</button>
+    <div id="status"></div>
+  </form>
+</div>
+
+<script>
+const MAX_PROFILES = 10;
+
+function buildProfileInputs(profiles) {
+    const container = document.getElementById('wifi-profiles');
+    container.innerHTML = '';
+    for (let i = 0; i < MAX_PROFILES; i++) {
+        const ssid    = (profiles && profiles[i]) ? profiles[i].ssid    : '';
+        const hasPass = (profiles && profiles[i]) ? profiles[i].hasPass : false;
+        const row = document.createElement('div');
+        row.className = 'profile-row';
+        row.innerHTML = `
+            <div class="profile-num">Profile #${i}</div>
+            <div>
+                <label>SSID</label>
+                <input type="text" name="wifiSsid${i}" value="${ssid}"
+                       autocomplete="off" placeholder="empty = unused">
+            </div>
+            <div>
+                <label>Password</label>
+                <input type="password" name="wifiPass${i}"
+                       placeholder="${hasPass ? 'unchanged' : 'no password'}">
+            </div>`;
+        container.appendChild(row);
+    }
+}
+
+
+function selectByValue(el, value) {
+    const str = String(value);
+    for (let i = 0; i < el.options.length; i++) {
+        if (el.options[i].value === str) { el.selectedIndex = i; return; }
+    }
+    el.selectedIndex = 0;
+}
+
+async function loadConfig() {
+    try {
+        const d = await fetch('/api/config').then(r => r.json());
+        const f = document.getElementById('form');
+
+        // WiFi profiles
+        buildProfileInputs(d.wifiProfiles);
+
+        // AP
+        f.querySelector('[name=apEnabled]').checked = d.apEnabled ?? false;
+        f.querySelector('[name=apSsid]').value      = d.apSsid ?? '';
+
+        // BMS
+        f.querySelector('[name=bmsDeviceName]').value  = d.bmsDeviceName ?? '';
+        f.querySelector('[name=bmsPollInterval]').value = d.bmsPollInterval ?? 5000;
+
+        // MQTT
+        f.querySelector('[name=mqttEnabled]').checked = d.mqttEnabled ?? false;
+        f.querySelector('[name=mqttServer]').value    = d.mqttServer ?? '';
+        f.querySelector('[name=mqttPort]').value      = d.mqttPort ?? 1883;
+        f.querySelector('[name=mqttTopic]').value     = d.mqttTopic ?? '';
+        f.querySelector('[name=mqttInterval]').value  = d.mqttInterval ?? 30;
+
+        // SOC Limiter
+        f.querySelector('[name=socLimitEnabled]').checked = d.socLimitEnabled ?? false;
+        f.querySelector('[name=socLimitMax]').value       = d.socLimitMax ?? 80;
+
+        // Estimator
+        f.querySelector('[name=estTau]').value = d.estimatorTau ?? 60;
+
+        // Display
+        selectByValue(f.querySelector('[name=displayTimeout]'), d.displayTimeout ?? 600);
+
+        // Update hints
+        updateAlpha(d.estimatorTau ?? 60);
+        updateResume(d.socLimitMax ?? 80);
+
+        document.getElementById('loading').style.display = 'none';
+        f.style.display = 'block';
+    } catch(e) {
+        document.getElementById('loading').textContent = 'Failed to load config: ' + e.message;
+    }
+}
+
+function updateAlpha(tau) {
+    const a = 1 / (parseFloat(tau) + 1);
+    document.getElementById('alphaHint').textContent = a.toFixed(4);
+}
+
+function updateResume(max) {
+    document.getElementById('resumeHint').textContent = Math.max(1, parseInt(max) - 3);
+}
+
+document.querySelector('[name=socLimitMax]') &&
+    document.querySelector('[name=socLimitMax]').addEventListener('input', e => updateResume(e.target.value));
+
+document.getElementById('form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const btn = e.target.querySelector('.save-btn');
+    const status = document.getElementById('status');
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+    try {
+        const data = new URLSearchParams(new FormData(e.target));
+
+        // Checkboxes: ensure 0 when unchecked
+        ['mqttEnabled', 'socLimitEnabled', 'apEnabled'].forEach(n => {
+            if (!e.target.querySelector(`[name=${n}]`).checked) data.set(n, '0');
+            else data.set(n, '1');
+        });
+
+        const r = await fetch('/api/config/save', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: data.toString()
+        });
+        if (r.ok) {
+            status.className = 'ok';
+            status.textContent = 'Saved successfully!';
+        } else {
+            throw new Error('HTTP ' + r.status);
+        }
+    } catch(err) {
+        status.className = 'err';
+        status.textContent = 'Save failed: ' + err.message;
+    }
+    btn.disabled = false;
+    btn.textContent = 'Save & Apply';
+    setTimeout(() => status.style.display = 'none', 4000);
+});
+
+loadConfig();
+</script>
+</body>
+</html>

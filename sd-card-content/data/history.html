@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>BMS History</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0F172A;color:#F1F5F9;font-family:system-ui,-apple-system,sans-serif;
+     height:100dvh;display:flex;flex-direction:column;overflow:hidden}
+#hdr{padding:10px 16px;background:#1E293B;border-bottom:1px solid #334155;
+     display:flex;align-items:center;gap:10px;flex-shrink:0}
+#hdr h1{font-size:15px;font-weight:600;flex:1}
+#live{background:#22C55E;color:#0F172A;font-size:11px;font-weight:700;
+      padding:3px 8px;border-radius:12px;display:none;animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+#btns{padding:8px 12px;display:flex;gap:6px;background:#1E293B;
+      border-bottom:1px solid #334155;flex-shrink:0}
+.btn{flex:1;padding:9px 2px;background:#334155;color:#CBD5E1;border:none;
+     border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;
+     touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+.btn.act{background:#38BDF8;color:#0F172A}
+.btn:active{opacity:.7}
+#wrap{flex:1;padding:8px 4px 4px;min-height:0;position:relative}
+#wrap canvas{display:block}
+#info{position:absolute;bottom:6px;right:10px;font-size:10px;color:#475569}
+#overlay{display:none;position:absolute;inset:0;background:#0F172A;
+         align-items:center;justify-content:center;flex-direction:column;
+         gap:14px;text-align:center;padding:24px}
+#overlay.show{display:flex}
+#overlay .ico{font-size:36px}
+#overlay .msg{color:#CBD5E1;font-size:13px;line-height:1.6;white-space:pre-line}
+</style>
+</head>
+<body>
+<div id="hdr">
+  <a href="/" style="color:#64748B;font-size:18px;text-decoration:none"
+     title="Back">&#8592;</a>
+  <h1>BMS History</h1>
+  <span id="live">● LIVE</span>
+</div>
+<div id="btns">
+  <button class="btn" data-s="300"    onclick="setWin(300)">5m</button>
+  <button class="btn" data-s="600"    onclick="setWin(600)">10m</button>
+  <button class="btn" data-s="3600"   onclick="setWin(3600)">1h</button>
+  <button class="btn" data-s="86400"  onclick="setWin(86400)">24h</button>
+  <button class="btn" data-s="604800" onclick="setWin(604800)">7d</button>
+  <button class="btn"                 onclick="resetZoom()">&#8635;</button>
+</div>
+<div id="wrap">
+  <canvas id="c"></canvas>
+  <div id="info"></div>
+  <div id="overlay">
+    <div class="ico" id="oico">&#9203;</div>
+    <div class="msg" id="omsg">Loading...</div>
+    <button class="btn" style="max-width:110px;display:none" id="obtn"
+            onclick="retryLoad()">Retry</button>
+  </div>
+</div>
+
+<script>
+// ── CDN sources ────────────────────────────────────────────────────────────────
+const SRCS_LOCAL = [
+  '/js/chart.js',
+  '/js/hammer.js',
+  '/js/zoom.js'
+];
+const SRCS_CDN = [
+  'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js',
+  'https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js',
+  'https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js'
+];
+
+// ── State ──────────────────────────────────────────────────────────────────────
+let chart = null, nowSec = 0, lastTs = 0;
+let liveTimer = null, axisTimer = null, debounce = null;
+let lastWinSec = 300, rafPending = false;
+
+// ── Script loader ──────────────────────────────────────────────────────────────
+function loadScript(src) {
+  return new Promise((ok, fail) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = ok;
+    s.onerror = () => fail(new Error('Failed: ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+// ── Overlay helpers ────────────────────────────────────────────────────────────
+function showOverlay(ico, msg, showBtn) {
+  document.getElementById('oico').textContent = ico;
+  document.getElementById('omsg').textContent = msg;
+  document.getElementById('obtn').style.display = showBtn ? 'block' : 'none';
+  document.getElementById('overlay').classList.add('show');
+}
+function hideOverlay() {
+  document.getElementById('overlay').classList.remove('show');
+}
+
+// ── Time label ─────────────────────────────────────────────────────────────────
+function tsLabel(ts) {
+  const ago = Math.max(0, Math.round(nowSec - ts));
+  if (ago <    60) return `-${ago}s`;
+  if (ago <  3600) return `-${Math.floor(ago/60)}m`;
+  if (ago < 86400) return `-${Math.floor(ago/3600)}h${String(Math.floor((ago%3600)/60)).padStart(2,'0')}m`;
+  return `-${Math.floor(ago/86400)}d${String(Math.floor((ago%86400)/3600)).padStart(2,'0')}h`;
+}
+
+// ── LIVE badge ─────────────────────────────────────────────────────────────────
+function startLive() {
+  if (liveTimer) return;
+  document.getElementById('live').style.display = 'inline';
+  liveTimer = setInterval(doLiveUpdate, 10000);
+  // Redraw axis labels every second so relative times ("−5s") count down smoothly
+  axisTimer = setInterval(() => {
+    if (chart) chart.update('none');
+  }, 1000);
+}
+function stopLive() {
+  clearInterval(liveTimer); liveTimer = null;
+  clearInterval(axisTimer); axisTimer = null;
+  document.getElementById('live').style.display = 'none';
+}
+
+// ── Preset button highlight ────────────────────────────────────────────────────
+function markBtn(sec) {
+  document.querySelectorAll('.btn[data-s]').forEach(b =>
+    b.classList.toggle('act', +b.dataset.s === sec));
+}
+
+// ── Fetch ──────────────────────────────────────────────────────────────────────
+async function apiFetch(from, to) {
+  const r = await fetch(`/api/history?from=${Math.floor(from)}&to=${Math.floor(to)}`);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+// ── Map API points to Chart.js {x,y} arrays ───────────────────────────────────
+function mapPoints(pts) {
+  return {
+    soc: pts.map(p => ({x: p.t, y: p.s})),
+    cur: pts.map(p => ({x: p.t, y: p.c / 100})),
+    c:   [0,1,2,3].map(i => pts.map(p => ({x: p.t, y: p.v[i] || null}))),
+    u:   pts.map(p => ({x: p.t, y: p.u ? p.u / 1000 : null}))
+  };
+}
+
+// ── Info bar ───────────────────────────────────────────────────────────────────
+function updateInfo(data) {
+  const p = data.points;
+  if (!p.length) { document.getElementById('info').textContent = 'no data'; return; }
+  const lp = p[p.length-1];
+  document.getElementById('info').textContent =
+    `tier ${data.tier} · ${p.length} pts · ${lp.s}% SOC · ${(lp.c/100).toFixed(2)}A`;
+}
+
+// ── Load a time range ──────────────────────────────────────────────────────────
+async function loadRange(from, to, winSec) {
+  try {
+    const data = await apiFetch(from, to);
+    nowSec = data.now;
+    const pts = data.points;
+    if (pts.length) lastTs = pts[pts.length-1].t;
+
+    const m = mapPoints(pts);
+
+    // Always use the REQUESTED window for the axes, not the data extent
+    const xmin = from;
+    const xmax = to;
+
+    if (!chart) {
+      buildChart(m, xmin, xmax);
+    } else {
+      chart.data.datasets[0].data = m.soc;
+      chart.data.datasets[1].data = m.cur;
+      chart.data.datasets[2].data = m.u;
+      [0,1,2,3].forEach(i => chart.data.datasets[3+i].data = m.c[i]);
+      chart.options.scales.x.min = xmin;
+      chart.options.scales.x.max = xmax;
+      chart.update('none');
+    }
+
+    updateInfo(data);
+    hideOverlay();
+    if (winSec) markBtn(winSec);
+
+    // Live when right edge is within 30s of now
+    if (to >= nowSec - 30) startLive(); else stopLive();
+
+  } catch(e) {
+    showOverlay('⚠️', 'Failed to load history data.\n' + e.message, true);
+  }
+}
+
+
+// ── Live append ────────────────────────────────────────────────────────────────
+async function doLiveUpdate() {
+  try {
+    const data = await apiFetch(lastTs + 1, nowSec + 120);
+    nowSec = data.now;
+    if (!data.points.length) return;
+    const pts = data.points;
+    lastTs = pts[pts.length-1].t;
+    const m = mapPoints(pts);
+    chart.data.datasets[0].data.push(...m.soc);
+    chart.data.datasets[1].data.push(...m.cur);
+    chart.data.datasets[2].data.push(...m.u);
+    [0,1,2,3].forEach(i => chart.data.datasets[3+i].data.push(...m.c[i]));
+    chart.options.scales.x.max = nowSec;
+    chart.update('none');
+    updateInfo(data);
+  } catch(e) { console.warn('live update error', e); }
+}
+
+// ── Build chart (called once) ──────────────────────────────────────────────────
+function buildChart(m, xmin, xmax) {
+  const ctx = document.getElementById('c').getContext('2d');
+  const base = { type:'line', pointRadius:0, borderWidth:1.5,
+                 tension:0.2, spanGaps:false, parsing:false };
+  const CELL_COLORS = ['#F59E0B','#FB923C','#A78BFA','#34D399'];
+
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: { datasets: [
+      {...base, label:'SOC %',     data:m.soc, yAxisID:'yS',
+                borderColor:'#22C55E', fill:true, backgroundColor:'#22C55E15'},
+      {...base, label:'Current A', data:m.cur, yAxisID:'yC',
+                borderColor:'#38BDF8', fill:false},
+      {...base, label:'Voltage V', data:m.u,   yAxisID:'yU',
+                borderColor:'#E879F9', fill:false, borderWidth:1.5,
+                hidden: true},
+      ...[0,1,2,3].map(i => ({
+        ...base, label:`Cell ${i+1}`, data:m.c[i], yAxisID:'yV',
+        borderColor:CELL_COLORS[i], borderWidth:1,
+        hidden: true
+      }))
+    ]},
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode:'index', intersect:false, axis:'x' },
+      scales: {
+        x: {
+          type: 'linear', min: xmin, max: xmax,
+          ticks: { color:'#64748B', maxTicksLimit:6,
+                   callback: v => tsLabel(v) },
+          grid:  { color:'#1E293B' }
+        },
+        yS: {
+          type:'linear', position:'left', min:0, max:100,
+          title:{ display:true, text:'SOC %', color:'#22C55E', font:{size:10} },
+          ticks:{ color:'#22C55E', maxTicksLimit:5, callback:v=>v+'%' },
+          grid: { color:'#1E293B' }
+        },
+        yC: {
+          type:'linear', position:'right',
+          title:{ display:true, text:'A', color:'#38BDF8', font:{size:10} },
+          ticks:{ color:'#38BDF8', maxTicksLimit:5,
+                  callback:v=>v.toFixed(1) },
+          grid: { drawOnChartArea:false }
+        },
+        yU: {
+          type:'linear', position:'right',
+          display: 'auto',
+          title:{ display:true, text:'V', color:'#E879F9', font:{size:10} },
+          ticks:{ color:'#E879F9', maxTicksLimit:5,
+                  callback: v => v.toFixed(2) },
+          grid: { drawOnChartArea:false }
+        },
+        yV: {
+          type:'linear', position:'right',
+          display: 'auto',
+          title:{ display:true, text:'mV', color:'#F59E0B', font:{size:10} },
+          ticks:{ color:'#94A3B8', maxTicksLimit:5 },
+          grid: { drawOnChartArea:false }
+        }
+      },
+      plugins: {
+        legend: {
+          labels:{ color:'#CBD5E1', boxWidth:10, font:{size:11},
+                   padding:8 }
+        },
+        tooltip: {
+          backgroundColor:'#1E293B', borderColor:'#334155',
+          borderWidth:1, titleColor:'#94A3B8',
+          bodyColor:'#F1F5F9', padding:10,
+          callbacks: {
+            title: items => 'T ' + tsLabel(items[0].parsed.x),
+            label: item => {
+              const v = item.parsed.y;
+              if (v === null) return null;
+              switch(item.datasetIndex) {
+                case 1: return ` Current: ${v.toFixed(2)} A`;
+                case 2: return ` Voltage: ${v.toFixed(3)} V`;
+                default:return ` ${item.dataset.label}: ${v} mV`;
+              }
+            }
+          }
+        },
+        zoom: {
+          zoom: {
+            wheel:{ enabled:true }, pinch:{ enabled:true }, mode:'x',
+            onZoomComplete: onViewChange
+          },
+          pan: {
+            enabled:true, mode:'x',
+            onPanComplete: onViewChange
+          }
+        }
+      }
+    }
+  });
+}
+
+function onViewChange({chart: c}) {
+  // Use rAF for smooth 60fps visual update during gesture
+  if (!rafPending) {
+    rafPending = true;
+    requestAnimationFrame(() => {
+      rafPending = false;
+      if (chart) chart.update('none');
+    });
+  }
+  // Debounced re-fetch 600ms after gesture ends
+  clearTimeout(debounce);
+  debounce = setTimeout(() => {
+    stopLive();
+    const {min, max} = c.scales.x;
+    loadRange(Math.floor(min), Math.floor(max), null);
+  }, 600);
+}
+
+// ── Public controls ────────────────────────────────────────────────────────────
+async function setWin(sec) {
+  lastWinSec = sec;
+  markBtn(sec);
+  // Always refresh server time so the window is anchored correctly
+  try {
+    const r = await fetch('/api/now');
+    nowSec = (await r.json()).now;
+  } catch(e) { /* keep existing nowSec if fetch fails */ }
+  const to   = nowSec;
+  const from = Math.max(0, to - sec);
+  loadRange(from, to, sec);
+}
+
+function resetZoom() {
+  if (chart) chart.resetZoom();
+  setWin(lastWinSec);
+}
+
+function retryLoad() { setWin(lastWinSec); }
+
+// ── Bootstrap: load CDN scripts then render ────────────────────────────────────
+
+async function tryLoadSrcs(srcs) {
+  for (const src of srcs)
+    await loadScript(src);
+}
+
+showOverlay('⏳', 'Loading chart library...', false);
+
+tryLoadSrcs(SRCS_LOCAL)
+  .catch(() => {
+    showOverlay('⏳', 'Local JS not on SD card.\nTrying CDN...', false);
+    return tryLoadSrcs(SRCS_CDN);
+  })
+  .then(async () => {
+    Chart.register(window.ChartZoom);
+    try {
+      showOverlay('⏳', 'Fetching server time...', false);
+      const r = await fetch('/api/now');
+      nowSec = (await r.json()).now;
+    } catch(e) {
+      showOverlay('⚠️', 'Could not reach /api/now\n' + e.message, true);
+      return;
+    }
+    setWin(300);
+  })
+  .catch(e => {
+    showOverlay('⚠️',
+      'Could not load chart library.\n\nFor AP mode: copy chart.js, hammer.js,\nzoom.js to the SD card root.\n\n' + e.message,
+      true);
+  });
+</script>
+</body>
+</html>
