@@ -1,487 +1,556 @@
+/*
+ * web_api.cpp — REST routes + embedded HTML served from flash (PROGMEM)
+ *
+ * GET  /             dashboard (live PV data, auto-refreshes every 5 s)
+ * GET  /config       configuration page (WiFi, Victron, MQTT, Display)
+ * GET  /api/data     JSON live + config data used by both pages
+ * POST /api/wifi     save WiFi profiles + AP settings
+ * POST /api/victron  save Victron device config (MAC + AES key)
+ * POST /api/mqtt     save MQTT settings
+ * POST /api/display  save display settings
+ * POST /api/reboot   reboot ESP
+ */
+
 #include "web_api.h"
 #include "config_store.h"
-#include "jbd_bms.h"
-#include "battery_estimator.h"
-#include "soc_limiter.h"
-#include "mqtt_client.h"
 #include "wifi_manager.h"
-#include "battery_estimator.h"
+#include "victron_ble.h"
+#include "mqtt_client.h"
+#include <Arduino.h>
 #include <ArduinoJson.h>
-#include "history.h"
-#include "history_sd.h"
-#include "display.h"
-#include "lcd_driver.h"
 
-static WebServer* s_srv = nullptr;  // back-pointer set in webApiRegisterRoutes()
-static bool s_screenshotPending = false;
+// ─────────────────────────────────────────────────────────────────────────
+// Dashboard HTML
+// ─────────────────────────────────────────────────────────────────────────
+static const char DASHBOARD_HTML[] PROGMEM = R"rawhtml(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Victron Monitor</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,sans-serif;background:#1a1a2e;color:#eee;min-height:100vh}
+  header{background:#16213e;padding:1rem;display:flex;justify-content:space-between;align-items:center}
+  header h1{font-size:1.2rem;color:#e94560}
+  nav a{color:#aaa;text-decoration:none;margin-left:1rem;font-size:.9rem}
+  nav a:hover{color:#e94560}
+  .container{max-width:900px;margin:0 auto;padding:1rem}
+  .total-card{background:linear-gradient(135deg,#e94560,#0f3460);border-radius:12px;
+    padding:1.5rem;text-align:center;margin-bottom:1.5rem}
+  .total-card .value{font-size:3rem;font-weight:700}
+  .total-card .label{font-size:.9rem;opacity:.8;margin-top:.25rem}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:1rem}
+  .card{background:#16213e;border-radius:10px;padding:1rem;border:1px solid #0f3460}
+  .card-title{font-size:.8rem;color:#aaa;text-transform:uppercase;letter-spacing:.05em}
+  .card-value{font-size:1.6rem;font-weight:600;margin:.25rem 0}
+  .card-sub{font-size:.8rem;color:#aaa}
+  .badge{display:inline-block;padding:.15rem .5rem;border-radius:4px;font-size:.75rem;font-weight:600}
+  .badge-ok{background:#0d7a3e;color:#fff}
+  .badge-warn{background:#b45309;color:#fff}
+  .badge-err{background:#b91c1c;color:#fff}
+  .badge-off{background:#374151;color:#aaa}
+  .device-list{margin-top:1.5rem}
+  .device-card{background:#16213e;border-radius:10px;padding:1rem;margin-bottom:1rem;
+    border-left:4px solid #e94560}
+  .device-card.offline{border-left-color:#374151;opacity:.6}
+  .device-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:.75rem}
+  .device-name{font-weight:600}
+  .device-mac{font-size:.75rem;color:#aaa}
+  .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem}
+  .metric{text-align:center;background:#0f3460;border-radius:6px;padding:.5rem}
+  .metric-val{font-size:1.1rem;font-weight:600}
+  .metric-lbl{font-size:.7rem;color:#aaa;margin-top:.15rem}
+  .state-bar{background:#0f3460;border-radius:6px;padding:.5rem .75rem;margin-top:.5rem;
+    display:flex;justify-content:space-between;font-size:.8rem;flex-wrap:wrap;gap:.25rem}
+  footer{text-align:center;padding:1.5rem;color:#555;font-size:.8rem}
+  .refresh-bar{display:flex;justify-content:flex-end;margin-bottom:1rem;align-items:center;
+    gap:.5rem;font-size:.8rem;color:#aaa}
+  .btn{background:#e94560;color:#fff;border:none;border-radius:6px;padding:.4rem .9rem;
+    cursor:pointer;font-size:.8rem;text-decoration:none;display:inline-block}
+  .btn:hover{background:#c73652}
+</style>
+</head>
+<body>
+<header>
+  <h1>&#9728; Victron Monitor</h1>
+  <nav><a href="/">Dashboard</a><a href="/config">Config</a></nav>
+</header>
+<div class="container">
+  <div class="refresh-bar">
+    <span id="last-update">—</span>
+    <button class="btn" onclick="fetchData()">Refresh</button>
+  </div>
+  <div class="total-card">
+    <div class="value" id="total-pv">— W</div>
+    <div class="label">Total PV Power</div>
+  </div>
+  <div class="grid">
+    <div class="card">
+      <div class="card-title">Devices Online</div>
+      <div class="card-value" id="devices-online">—</div>
+      <div class="card-sub" id="devices-total">of — configured</div>
+    </div>
+    <div class="card">
+      <div class="card-title">WiFi</div>
+      <div class="card-value" id="wifi-ssid">—</div>
+      <div class="card-sub" id="wifi-ip">—</div>
+    </div>
+    <div class="card">
+      <div class="card-title">MQTT</div>
+      <div class="card-value" id="mqtt-state">—</div>
+      <div class="card-sub" id="mqtt-pub">publishes: —</div>
+    </div>
+  </div>
+  <div class="device-list" id="device-list"></div>
+</div>
+<footer>Victron MPPT Monitor &bull; ESP32-C6</footer>
+<script>
+const stateMap={0:"Off",1:"Low Power",2:"Fault",3:"Bulk",4:"Absorption",
+  5:"Float",6:"Storage",7:"Equalize",9:"Inverting",11:"Power Supply",
+  245:"Starting",247:"Repeat Abs",248:"Auto Eq",249:"Bat Safe",252:"Ext Ctrl"};
+function stateName(s){return stateMap[s]||("State "+s);}
+function stateClass(s){
+  if([3,4,5,6,248].includes(s)) return "badge-ok";
+  if([0,1].includes(s)) return "badge-off";
+  return "badge-err";
+}
+const mqttStates=["Disabled","Waiting WiFi","Connecting","Connected","Disconnected"];
 
+function fetchData(){
+  fetch('/api/data').then(r=>r.json()).then(d=>{
+    document.getElementById('total-pv').textContent=d.total_pv_w.toFixed(0)+' W';
+    const online=d.devices.filter(x=>x.valid).length;
+    document.getElementById('devices-online').textContent=online;
+    document.getElementById('devices-total').textContent='of '+d.devices.length+' configured';
+    document.getElementById('wifi-ssid').textContent=d.wifi.ssid||'—';
+    document.getElementById('wifi-ip').textContent=d.wifi.ip+' | '+d.wifi.rssi+' dBm';
+    document.getElementById('mqtt-state').textContent=mqttStates[d.mqtt.state]||'—';
+    document.getElementById('mqtt-pub').textContent='publishes: '+d.mqtt.publish_count;
+    document.getElementById('last-update').textContent='Updated: '+new Date().toLocaleTimeString();
 
-// ─── /api/status ─────────────────────────────────────────────────────────────
+    const list=document.getElementById('device-list');
+    list.innerHTML='';
+    d.devices.forEach((dev,i)=>{
+      list.innerHTML+=`
+      <div class="device-card ${dev.valid?'':'offline'}">
+        <div class="device-header">
+          <div><div class="device-name">${dev.name||'Device '+i}</div>
+          <div class="device-mac">${dev.mac}</div></div>
+          <span class="badge ${stateClass(dev.charger_state)}">${stateName(dev.charger_state)}</span>
+        </div>
+        <div class="metrics">
+          <div class="metric"><div class="metric-val">${dev.pv_power_w.toFixed(0)} W</div>
+            <div class="metric-lbl">PV Power</div></div>
+          <div class="metric"><div class="metric-val">${dev.battery_voltage_v.toFixed(2)} V</div>
+            <div class="metric-lbl">Battery</div></div>
+          <div class="metric"><div class="metric-val">${dev.battery_current_a.toFixed(1)} A</div>
+            <div class="metric-lbl">Current</div></div>
+        </div>
+        <div class="state-bar">
+          <span>Yield today: ${dev.yield_today_kwh.toFixed(2)} kWh</span>
+          <span>RSSI: ${dev.rssi} dBm</span>
+          ${dev.error_code?'<span style="color:#f87171">Error: '+dev.error_code+'</span>':''}
+        </div>
+      </div>`;
+    });
+  }).catch(e=>console.error(e));
+}
+fetchData();
+setInterval(fetchData,5000);
+</script>
+</body></html>
+)rawhtml";
 
-static void handleApiStatus() {
-    String wifi_ip = wifiGetIp();   // store before JSON
+// ─────────────────────────────────────────────────────────────────────────
+// Config HTML
+// ─────────────────────────────────────────────────────────────────────────
+static const char CONFIG_HTML[] PROGMEM = R"rawhtml(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Victron Monitor – Config</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,sans-serif;background:#1a1a2e;color:#eee}
+  header{background:#16213e;padding:1rem;display:flex;justify-content:space-between;align-items:center}
+  header h1{font-size:1.2rem;color:#e94560}
+  nav a{color:#aaa;text-decoration:none;margin-left:1rem;font-size:.9rem}
+  nav a:hover{color:#e94560}
+  .container{max-width:800px;margin:0 auto;padding:1rem}
+  .section{background:#16213e;border-radius:10px;padding:1.25rem;margin-bottom:1.5rem;
+    border:1px solid #0f3460}
+  .section h2{font-size:1rem;color:#e94560;margin-bottom:1rem;border-bottom:1px solid #0f3460;
+    padding-bottom:.5rem}
+  .form-row{margin-bottom:.75rem}
+  label{display:block;font-size:.8rem;color:#aaa;margin-bottom:.25rem}
+  input,select{width:100%;background:#0f3460;border:1px solid #1e3a5f;border-radius:6px;
+    padding:.5rem .75rem;color:#eee;font-size:.9rem}
+  input:focus{outline:none;border-color:#e94560}
+  .btn{background:#e94560;color:#fff;border:none;border-radius:6px;padding:.5rem 1.2rem;
+    cursor:pointer;font-size:.9rem;margin-top:.5rem}
+  .btn:hover{background:#c73652}
+  .btn-secondary{background:#374151}
+  .btn-secondary:hover{background:#4b5563}
+  .block{background:#0f3460;border-radius:8px;padding:1rem;margin-bottom:.75rem}
+  .block-header{display:flex;justify-content:space-between;align-items:center;
+    margin-bottom:.75rem;font-weight:600}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:.75rem}
+  .cb-row{display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem}
+  .cb-row input{width:auto}
+  .toast{position:fixed;bottom:1rem;right:1rem;background:#0d7a3e;color:#fff;
+    padding:.75rem 1.25rem;border-radius:8px;display:none;font-size:.9rem;z-index:999}
+  @media(max-width:480px){.grid2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <h1>&#9728; Victron Monitor</h1>
+  <nav><a href="/">Dashboard</a><a href="/config">Config</a></nav>
+</header>
+<div class="container">
 
-    DynamicJsonDocument doc(1024);
+<div class="section">
+  <h2>WiFi Profiles (up to 10)</h2>
+  <div id="wifi-profiles"></div>
+  <button class="btn btn-secondary" onclick="addWifi()">+ Add Profile</button>
+  <div style="margin-top:1rem">
+    <div class="cb-row"><input type="checkbox" id="ap-enabled">
+      <label for="ap-enabled" style="margin:0">Enable AP mode fallback</label></div>
+    <div class="grid2">
+      <div class="form-row"><label>AP SSID</label><input id="ap-ssid"></div>
+      <div class="form-row"><label>AP Password</label><input id="ap-pass" type="password"></div>
+    </div>
+  </div>
+  <button class="btn" onclick="saveWifi()">Save WiFi</button>
+</div>
 
-    doc["uptime_s"]    = millis() / 1000UL;
-    doc["free_heap_b"] = ESP.getFreeHeap();
-    doc["wifi"]["rssi"]   = wifiGetRssi();
-    doc["wifi"]["ip"]     = wifi_ip.c_str();
-    doc["wifi"]["uptime"] = wifiGetUptime();
+<div class="section">
+  <h2>Victron MPPT Devices (up to 5)</h2>
+  <p style="font-size:.8rem;color:#aaa;margin-bottom:.75rem">
+    Get the BLE MAC and AES key from VictronConnect app<br>
+    (Victron Connect &rarr; device &rarr; Settings &rarr; Product info &rarr; Advertising key)
+  </p>
+  <div id="victron-devices"></div>
+  <button class="btn btn-secondary" onclick="addVictron()">+ Add Device</button>
+  <br><button class="btn" onclick="saveVictron()" style="margin-top:.75rem">Save Devices</button>
+</div>
 
-    doc["bms"]["connected"]  = bmsGetState() == BmsState::CONNECTED;
-    doc["bms"]["data_valid"] = bmsIsDataValid();
-    if (bmsIsDataValid()) {
-        const BmsBasicInfo& b = bmsGetData().basic;
-        doc["bms"]["voltage_v"]  = b.totalVoltage_V;
-        doc["bms"]["current_a"]  = b.current_A;
-        doc["bms"]["soc_pct"]    = b.stateOfCharge_pct;
-        doc["bms"]["charge_fet"] = (bool)(b.fetStatus & 0x01);
-        doc["bms"]["disch_fet"]  = (bool)(b.fetStatus & 0x02);
-    }
+<div class="section">
+  <h2>MQTT</h2>
+  <div class="cb-row" style="margin-bottom:.75rem">
+    <input type="checkbox" id="mqtt-enabled">
+    <label for="mqtt-enabled" style="margin:0">Enable MQTT</label>
+  </div>
+  <div class="grid2">
+    <div class="form-row"><label>Broker host / IP</label><input id="mqtt-server" placeholder="192.168.1.10"></div>
+    <div class="form-row"><label>Port</label><input id="mqtt-port" type="number" value="1883"></div>
+    <div class="form-row"><label>Topic base</label><input id="mqtt-topic" placeholder="victron"></div>
+    <div class="form-row"><label>Publish interval (s)</label><input id="mqtt-interval" type="number" value="30"></div>
+  </div>
+  <button class="btn" onclick="saveMqtt()">Save MQTT</button>
+</div>
 
-    doc["mqtt"]["connected"]     = mqttIsConnected();
-    doc["mqtt"]["publish_count"] = mqttGetPublishCount();
+<div class="section">
+  <h2>Display (Waveshare ESP32-C6 Touch 1.47")</h2>
+  <div class="grid2">
+    <div class="form-row"><label>Brightness (%)</label>
+      <input id="brightness" type="number" min="10" max="100"></div>
+    <div class="form-row"><label>Screen off timeout (s)</label>
+      <input id="disp-timeout" type="number"></div>
+  </div>
+  <button class="btn" onclick="saveDisplay()">Save Display</button>
+</div>
 
-    doc["soc_limiter"]["enabled"]  = configGetSocLimitEnabled();
-    doc["soc_limiter"]["limiting"] = socLimiterIsLimiting();
+<div class="section">
+  <h2>System</h2>
+  <button class="btn" style="background:#b91c1c" onclick="reboot()">&#8635; Reboot Device</button>
+</div>
 
-    String out;
-    serializeJson(doc, out);
-    s_srv->send(200, "application/json", out);
+</div>
+<div class="toast" id="toast"></div>
+<script>
+let wifiProfiles=[], victronDevices=[];
+
+function showToast(msg,ok=true){
+  const t=document.getElementById('toast');
+  t.textContent=msg; t.style.background=ok?'#0d7a3e':'#b91c1c';
+  t.style.display='block'; setTimeout(()=>t.style.display='none',2500);
 }
 
-static void handleApiScreenshot() {
-    lcdCaptureBegin();
-    lv_obj_invalidate(lv_scr_act());
+function escH(s){return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;');}
 
-    uint32_t deadline = millis() + 3000;
-    while (!lcdCaptureIsDone() && millis() < deadline) {
-        lv_task_handler();
-        delay(5);
-    }
-
-    if (millis() >= deadline) {
-        s_srv->send(503, "text/plain", "Capture timeout");
-        return;
-    }
-
-    s_srv->sendHeader("Location", "/screenshot.bmp");
-    s_srv->send(302, "text/plain", "");
+function renderWifi(){
+  const el=document.getElementById('wifi-profiles');
+  el.innerHTML=wifiProfiles.map((p,i)=>`
+    <div class="block">
+      <div class="block-header"><span>Profile ${i+1}</span>
+        <button class="btn btn-secondary" style="padding:.2rem .6rem;font-size:.75rem;margin:0"
+          onclick="wifiProfiles.splice(${i},1);renderWifi()">Remove</button></div>
+      <div class="grid2">
+        <div class="form-row"><label>SSID</label>
+          <input oninput="wifiProfiles[${i}].ssid=this.value" value="${escH(p.ssid)}"></div>
+        <div class="form-row"><label>Password</label>
+          <input type="password" oninput="wifiProfiles[${i}].pass=this.value" value="${escH(p.pass)}"></div>
+      </div></div>`).join('');
 }
 
-
-// ─── /api/config GET ─────────────────────────────────────────────────────────
-
-static void handleApiConfigGet() {
-    DynamicJsonDocument doc(2048);  // bigger for profiles
-    
-    // WiFi profiles
-    JsonArray wifi_profiles = doc.createNestedArray("wifiProfiles");
-    for (uint8_t i = 0; i < configGetWifiProfileCount(); i++) {
-        JsonObject prof = wifi_profiles.createNestedObject();
-        prof["ssid"] = configGetWifiProfile(i).ssid;
-        prof["hasPass"] = strlen(configGetWifiProfile(i).password) > 0;
-    }
-    doc["wifiProfileCount"] = configGetWifiProfileCount();
-    
-    // Other settings (unchanged)
-    doc["bmsDeviceName"] = configGetBmsDeviceName();
-    doc["bmsPollInterval"] = configGetBmsPollInterval();
-    doc["mqttEnabled"] = configGetMqttEnabled();
-    doc["mqttServer"] = configGetMqttServer();
-    doc["mqttPort"] = configGetMqttPort();
-    doc["mqttTopic"] = configGetMqttTopic();
-    doc["mqttInterval"] = configGetMqttInterval();
-    doc["socLimitEnabled"] = configGetSocLimitEnabled();
-    doc["socLimitMax"] = configGetMaxChargeSoc();
-    doc["estimatorTau"] = configGetEstTau();
-    doc["displayBacklight"] = configGetBacklight();
-    doc["displayTimeout"] = configGetDisplayTimeout();
-    doc["apEnabled"] = configGetApEnabled();
-    doc["apSsid"] = configGetApSsid();
-    
-    String out;
-    serializeJson(doc, out);
-    s_srv->send(200, "application/json", out);
+function renderVictron(){
+  const el=document.getElementById('victron-devices');
+  el.innerHTML=victronDevices.map((d,i)=>`
+    <div class="block">
+      <div class="block-header"><span>Device ${i+1}</span>
+        <button class="btn btn-secondary" style="padding:.2rem .6rem;font-size:.75rem;margin:0"
+          onclick="victronDevices.splice(${i},1);renderVictron()">Remove</button></div>
+      <div class="grid2">
+        <div class="form-row"><label>Friendly name</label>
+          <input oninput="victronDevices[${i}].name=this.value" value="${escH(d.name)}"></div>
+        <div class="form-row"><label>BLE MAC</label>
+          <input placeholder="AA:BB:CC:DD:EE:FF" oninput="victronDevices[${i}].mac=this.value"
+            value="${escH(d.mac)}"></div>
+      </div>
+      <div class="form-row"><label>AES Advertising Key (32 hex chars)</label>
+        <input placeholder="00112233445566778899aabbccddeeff"
+          oninput="victronDevices[${i}].key=this.value" value="${escH(d.key)}"></div>
+      <div class="cb-row" style="margin-top:.5rem">
+        <input type="checkbox" id="ve${i}" ${d.enabled?'checked':''}
+          onchange="victronDevices[${i}].enabled=this.checked">
+        <label for="ve${i}" style="margin:0">Enabled</label></div>
+    </div>`).join('');
 }
 
-// ─── /api/config/save POST ───────────────────────────────────────────────────
-static void handleApiConfigSave() {
-    auto arg = [&](const char* n) -> String {
-        return s_srv->hasArg(n) ? s_srv->arg(n) : String();
-    };
-
-    // Snapshot before save
-    // For WiFi: only care about the profile we're currently using
-    String currently_connected_ssid = wifiGetSsid();  // "" if not connected
-    bool old_ap_enabled  = configGetApEnabled();
-    String old_ap_ssid   = configGetApSsid();
-    String old_ap_pass   = configGetApPassword();
-
-    // Find the current profile's password before overwriting
-    String old_connected_pass = "";
-    for (uint8_t i = 0; i < configGetWifiProfileCount(); i++) {
-        if (String(configGetWifiProfile(i).ssid) == currently_connected_ssid) {
-            old_connected_pass = configGetWifiProfile(i).password;
-            break;
-        }
-    }
-
-    String old_mqtt_server = configGetMqttServer();
-    uint16_t old_mqtt_port = configGetMqttPort();
-    bool old_mqtt_en       = configGetMqttEnabled();
-
-    // --- WiFi profiles ---
-    uint8_t new_wifi_count = 0;
-    for (uint8_t i = 0; i < MAX_WIFI_PROFILES; i++) {
-        String ssid_key = "wifiSsid" + String(i);
-        String pass_key = "wifiPass" + String(i);
-
-        if (s_srv->hasArg(ssid_key.c_str()) && s_srv->arg(ssid_key).length() > 0) {
-            String new_pass = s_srv->hasArg(pass_key.c_str()) ? s_srv->arg(pass_key) : "";
-            if (new_pass.length() > 0) {
-                configSetWifiProfile(i, s_srv->arg(ssid_key).c_str(), new_pass.c_str());
-            } else {
-                // Keep existing password
-                configSetWifiProfile(i, s_srv->arg(ssid_key).c_str(),
-                                     configGetWifiProfile(i).password);
-            }
-            new_wifi_count = i + 1;
-            Serial.printf("[API] WiFi profile #%d saved: '%s' (pass %s)\n",
-                          i, s_srv->arg(ssid_key).c_str(),
-                          new_pass.length() > 0 ? "updated" : "unchanged");
-        }
-    }
-    configSetWifiProfileCount(new_wifi_count);
-
-    // --- AP ---
-    bool new_ap_enabled = arg("apEnabled") == "1";
-    configSetApEnabled(new_ap_enabled);
-    if (s_srv->hasArg("apSsid"))     configSetApSsid(arg("apSsid").c_str());
-    String new_ap_pass = arg("apPassword");
-    if (new_ap_pass.length() > 0)   configSetApPassword(new_ap_pass.c_str());
-
-    // --- BMS ---
-    if (s_srv->hasArg("bmsDeviceName")) configSetBmsDeviceName(arg("bmsDeviceName").c_str());
-    String poll_str = arg("bmsPollInterval");
-    if (poll_str.length()) configSetBmsPollInterval(poll_str.toInt());
-
-    // --- MQTT ---
-    configSetMqttEnabled(arg("mqttEnabled") == "1");
-    if (s_srv->hasArg("mqttServer"))  configSetMqttServer(arg("mqttServer").c_str());
-    String mqtt_port = arg("mqttPort");
-    if (mqtt_port.length()) configSetMqttPort(mqtt_port.toInt());
-    if (s_srv->hasArg("mqttTopic"))   configSetMqttTopic(arg("mqttTopic").c_str());
-    String mqtt_interval = arg("mqttInterval");
-    if (mqtt_interval.length()) configSetMqttInterval(mqtt_interval.toInt());
-
-    // --- SOC limiter ---
-    socLimiterSetEnabled(arg("socLimitEnabled") == "1");
-    String soc = arg("socLimitMax");
-    if (soc.length()) configSetMaxChargeSoc((uint8_t)soc.toInt());
-
-    // --- Estimator ---
-    String tau_str = arg("estTau");
-    if (tau_str.length()) {
-        float tau = tau_str.toFloat();
-        configSetEstTau(tau);
-        batEstSetTau(tau);
-    }
-
-    // --- Display ---
-    String dto = arg("displayTimeout");
-    if (dto.length()) configSetDisplayTimeout((uint16_t)dto.toInt());
-
-    configSave();
-    // socLimiterApplyConfig();
-
-    // ── WiFi change detection ─────────────────────────────────────────────
-    // Find the new password for the currently connected SSID (if still in list)
-    String new_connected_pass = "";
-    bool connected_ssid_still_exists = false;
-    for (uint8_t i = 0; i < configGetWifiProfileCount(); i++) {
-        if (String(configGetWifiProfile(i).ssid) == currently_connected_ssid) {
-            new_connected_pass = configGetWifiProfile(i).password;
-            connected_ssid_still_exists = true;
-            break;
-        }
-    }
-
-    bool ap_changed = (old_ap_enabled != new_ap_enabled)
-                   || (old_ap_ssid != configGetApSsid())
-                   || (new_ap_pass.length() > 0 && new_ap_pass != old_ap_pass);
-
-    bool current_connection_changed =
-        !wifiIsConnected()                          // not connected → try connecting
-        || !connected_ssid_still_exists             // our SSID was removed from profiles
-        || (new_connected_pass != old_connected_pass); // our password changed
-
-    bool wifi_changed = ap_changed || current_connection_changed;
-
-    // ── Apply ─────────────────────────────────────────────────────────────
-    if (wifi_changed) {
-        Serial.printf("[API] WiFi change detected (ap=%s conn=%s) – applying\n",
-                      ap_changed ? "yes" : "no",
-                      current_connection_changed ? "yes" : "no");
-        wifiApplyConfig();
-    } else {
-        Serial.printf("[API] WiFi unchanged for current connection '%s' – no reconnect\n",
-                      currently_connected_ssid.c_str());
-    }
-
-    bool mqtt_changed = (old_mqtt_server != configGetMqttServer())
-                     || (old_mqtt_port   != configGetMqttPort())
-                     || (old_mqtt_en     != configGetMqttEnabled());
-    if (mqtt_changed) mqttApplyConfig();
-
-    displayApplyConfig();
-    s_srv->send(200, "text/plain", "OK");
-    Serial.printf("[API] Config saved  wifi=%s  mqtt=%s\n",
-                  wifi_changed ? "CHANGED" : "unchanged",
-                  mqtt_changed ? "CHANGED" : "unchanged");
+function addWifi(){
+  if(wifiProfiles.length<10){wifiProfiles.push({ssid:'',pass:''});renderWifi();}
+  else showToast('Max 10 profiles',false);
+}
+function addVictron(){
+  if(victronDevices.length<5){victronDevices.push({name:'',mac:'',key:'',enabled:true});renderVictron();}
+  else showToast('Max 5 devices',false);
 }
 
-
-// ─── /api/mqtt/publish POST ──────────────────────────────────────────────────
-
-static void handleApiMqttPublish() {
-    mqttPublishNow();
-    s_srv->send(200, "text/plain", "OK");
+function saveWifi(){
+  const profiles=wifiProfiles.filter(p=>p.ssid.trim());
+  fetch('/api/wifi',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({profiles,
+      ap_enabled:document.getElementById('ap-enabled').checked,
+      ap_ssid:document.getElementById('ap-ssid').value,
+      ap_pass:document.getElementById('ap-pass').value
+    })}).then(r=>r.json()).then(d=>showToast(d.ok?'WiFi saved!':'Error: '+d.err,d.ok));
 }
 
-// ─── /api/now ────────────────────────────────────────────────────────────────
-
-static void handleApiNow() {
-    char buf[32];
-    snprintf(buf, sizeof(buf), "{\"now\":%lu}", historyNow());
-    s_srv->send(200, "application/json", buf);
+function saveVictron(){
+  fetch('/api/victron',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({devices:victronDevices})})
+    .then(r=>r.json()).then(d=>showToast(d.ok?'Devices saved!':'Error: '+d.err,d.ok));
 }
 
-
-static String uptimeString() {
-    uint32_t sec  = millis() / 1000;
-    uint32_t days = sec / 86400; sec %= 86400;
-    uint32_t h    = sec / 3600;  sec %= 3600;
-    uint32_t m    = sec / 60;    sec %= 60;
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%lud %02lu:%02lu:%02lu", days, h, m, sec);
-    return String(buf);
+function saveMqtt(){
+  fetch('/api/mqtt',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      server:document.getElementById('mqtt-server').value,
+      port:+document.getElementById('mqtt-port').value,
+      topic:document.getElementById('mqtt-topic').value,
+      interval:+document.getElementById('mqtt-interval').value,
+      enabled:document.getElementById('mqtt-enabled').checked
+    })}).then(r=>r.json()).then(d=>showToast(d.ok?'MQTT saved!':'Error: '+d.err,d.ok));
 }
 
-static String formatTime(uint32_t secs) {
-    char buf[24];
-    batEstFormatTime(secs, buf, sizeof(buf));
-    return String(buf);
+function saveDisplay(){
+  fetch('/api/display',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      brightness:+document.getElementById('brightness').value,
+      timeout:+document.getElementById('disp-timeout').value
+    })}).then(r=>r.json()).then(d=>showToast(d.ok?'Saved!':'Error: '+d.err,d.ok));
 }
 
-static const char* socLimiterStateStr() {
-    switch (socLimiterGetState()) {
-        case SocLimiterState::LIMITER_DISABLED: return "Disabled";
-        case SocLimiterState::MONITORING:       return "Monitoring";
-        case SocLimiterState::LIMITING:         return "Limiting (FET OFF)";
-        case SocLimiterState::WAITING_FOR_BMS:  return "Waiting for BMS";
-        default:                                return "Unknown";
-    }
+function reboot(){
+  if(confirm('Reboot device now?'))
+    fetch('/api/reboot',{method:'POST'}).then(()=>showToast('Rebooting…'));
 }
 
-static const char* wifiStateStr() {
-    switch (wifiGetState()) {
-        case WifiState::IDLE:          return "Idle";
-        case WifiState::CONNECTING:    return "Connecting";
-        case WifiState::CONNECTED:     return "Connected";
-        case WifiState::WAITING_RETRY: return "Waiting to retry";
-        case WifiState::AP:            return "AP";
-        default:                       return "Unknown";
-    }
-}
+// Populate from live data
+fetch('/api/data').then(r=>r.json()).then(d=>{
+  wifiProfiles=(d.wifi_profiles||[]).map(p=>({ssid:p.ssid,pass:''}));
+  renderWifi();
+  document.getElementById('ap-enabled').checked=!!d.ap_enabled;
+  document.getElementById('ap-ssid').value=d.ap_ssid||'';
 
+  victronDevices=(d.victron_cfg||[]).map(v=>({name:v.name,mac:v.mac,key:'',enabled:v.enabled}));
+  renderVictron();
+
+  const mc=d.mqtt_cfg||{};
+  document.getElementById('mqtt-server').value=mc.server||'';
+  document.getElementById('mqtt-port').value=mc.port||1883;
+  document.getElementById('mqtt-topic').value=mc.topic||'victron';
+  document.getElementById('mqtt-interval').value=mc.interval||30;
+  document.getElementById('mqtt-enabled').checked=!!mc.enabled;
+
+  const dc=d.display||{};
+  document.getElementById('brightness').value=dc.brightness||80;
+  document.getElementById('disp-timeout').value=dc.timeout||600;
+});
+</script>
+</body></html>
+)rawhtml";
+
+// ─────────────────────────────────────────────────────────────────────────
+// Route implementation
+// ─────────────────────────────────────────────────────────────────────────
+static WebServer* s_server = nullptr;
+
+static void sendJson(const String& json, int code = 200) {
+    s_server->send(code, "application/json", json);
+}
 
 static void handleApiData() {
-    StaticJsonDocument<2048> doc;
+    DynamicJsonDocument doc(4096);
+    uint8_t n = victronBleGetDeviceCount();
+    const VictronMpptData* devs = victronBleGetDevices();
 
-    const BmsData& bms = bmsGetData();
-    JsonObject jBms    = doc.createNestedObject("bms");
-    jBms["connected"]  = (bmsGetState() == BmsState::CONNECTED);
-    jBms["dataValid"]  = bmsIsDataValid();
-
-    if (bmsIsDataValid()) {
-        const BmsBasicInfo& b = bms.basic;
-        jBms["voltage"]      = serialized(String(b.totalVoltage_V,     2));
-        jBms["current"]      = serialized(String(b.current_A,          2));
-        jBms["soc"]          = b.stateOfCharge_pct;
-        jBms["remainCap"]    = serialized(String(b.remainCapacity_Ah,  2));
-        jBms["nominalCap"]   = serialized(String(b.nominalCapacity_Ah, 2));
-        jBms["cycles"]       = b.cycleCount;
-        jBms["chargeFet"]    = (bool)(b.fetStatus & 0x01);
-        jBms["dischargeFet"] = (bool)(b.fetStatus & 0x02);
-        jBms["protection"]   = b.protectionStatus;
-
-        JsonArray jTemps = jBms.createNestedArray("temps");
-        for (uint8_t i = 0; i < b.numNTC && i < 8; i++)
-            jTemps.add(serialized(String(b.temperature_C[i], 1)));
-
-        JsonArray jCells = jBms.createNestedArray("cells");
-        if (bms.cells.valid)
-            for (uint8_t i = 0; i < bms.cells.cellCount; i++)
-                jCells.add(bms.cells.cellVoltage_mV[i]);
+    doc["total_pv_w"] = victronBleGetTotalPvPower();
+    JsonArray arr = doc.createNestedArray("devices");
+    for (uint8_t i = 0; i < n; i++) {
+        JsonObject o = arr.createNestedObject();
+        o["name"]              = devs[i].name;
+        o["mac"]               = devs[i].mac;
+        o["valid"]             = devs[i].valid;
+        o["pv_power_w"]        = devs[i].pvPower_W;
+        o["battery_voltage_v"] = devs[i].batteryVoltage_V;
+        o["battery_current_a"] = devs[i].batteryCurrent_A;
+        o["yield_today_kwh"]   = devs[i].yieldToday_kWh;
+        o["charger_state"]     = (int)devs[i].chargerState;
+        o["error_code"]        = (int)devs[i].errorCode;
+        o["rssi"]              = devs[i].rssi;
     }
 
-    JsonObject jEst = doc.createNestedObject("estimator");
-    jEst["valid"]   = batEstIsValid();
-    if (batEstIsValid()) {
-        const BatEstimate& e    = batEstGet();
-        jEst["filteredCurrent"] = serialized(String(e.filteredCurrent_A,  3));
-        jEst["power"]           = serialized(String(e.power_W,            1));
-        jEst["remainEnergy"]    = serialized(String(e.remainingEnergy_Wh, 1));
-        jEst["energyToFull"]    = serialized(String(e.energyToFull_Wh,    1));
-        jEst["dischargeTimeValid"] = e.dischargeTimeValid;
-        jEst["dischargeTimeSec"]   = e.remainingDischargeTime_s;
-        jEst["dischargeTimeStr"]   = formatTime(e.remainingDischargeTime_s);
-        jEst["chargeTimeValid"]    = e.chargeTimeValid;
-        jEst["chargeTimeSec"]      = e.remainingChargeTime_s;
-        jEst["chargeTimeStr"]      = formatTime(e.remainingChargeTime_s);
+    JsonObject wifi = doc.createNestedObject("wifi");
+    wifi["ssid"] = wifiGetSsid();
+    wifi["ip"]   = wifiGetIp();
+    wifi["rssi"] = wifiGetRssi();
+
+    JsonObject mqtt = doc.createNestedObject("mqtt");
+    mqtt["state"]         = (int)mqttGetState();
+    mqtt["publish_count"] = mqttGetPublishCount();
+
+    JsonArray wp = doc.createNestedArray("wifi_profiles");
+    for (uint8_t i = 0; i < configGetWifiProfileCount(); i++) {
+        JsonObject p = wp.createNestedObject();
+        p["ssid"] = configGetWifiProfile(i).ssid;
+    }
+    doc["ap_enabled"] = configGetApEnabled();
+    doc["ap_ssid"]    = configGetApSsid();
+
+    JsonArray vc = doc.createNestedArray("victron_cfg");
+    for (uint8_t i = 0; i < configGetVictronCount(); i++) {
+        const VictronDeviceCfg& c = configGetVictronDevice(i);
+        JsonObject o = vc.createNestedObject();
+        o["name"]    = c.name;
+        o["mac"]     = c.mac;
+        o["enabled"] = c.enabled;
     }
 
-    JsonObject jLim  = doc.createNestedObject("socLimiter");
-    jLim["enabled"]  = configGetSocLimitEnabled();
-    jLim["limiting"] = socLimiterIsLimiting();
-    jLim["state"]    = socLimiterStateStr();
-    jLim["threshold"]= socLimiterGetThreshold();
-    jLim["resumeAt"] = socLimiterGetResumeAt();
+    JsonObject mc = doc.createNestedObject("mqtt_cfg");
+    mc["server"]   = configGetMqttServer();
+    mc["port"]     = configGetMqttPort();
+    mc["topic"]    = configGetMqttTopic();
+    mc["interval"] = configGetMqttInterval();
+    mc["enabled"]  = configGetMqttEnabled();
 
-    // Store String temporaries BEFORE building JSON — prevents dangling pointers
-    String wifi_ssid   = wifiGetSsid();
-    String wifi_ip     = wifiGetIp();
-    String wifi_ap_ip  = wifiGetApIp();
-    String uptime_str  = uptimeString();
+    JsonObject dc = doc.createNestedObject("display");
+    dc["brightness"] = configGetBacklight();
+    dc["timeout"]    = configGetDisplayTimeout();
 
-    JsonObject jWifi = doc.createNestedObject("wifi");
-    jWifi["state"]     = wifiStateStr();
-    jWifi["connected"] = wifiIsConnected();
-    jWifi["ip"]        = wifi_ip.c_str();
-    jWifi["ssid"]      = wifi_ssid.c_str();
-    jWifi["rssi"]      = wifiGetRssi();
-    jWifi["uptime"]    = wifiGetUptime();
-    jWifi["apEnabled"] = configGetApEnabled();
-    jWifi["apSsid"]    = configGetApSsid();      // const char* from EEPROM — safe
-    jWifi["apIp"]      = wifi_ap_ip.c_str();
-    jWifi["mode"]      = wifiIsAp() ? "AP" : "STA";
-
-    JsonObject jMcu = doc.createNestedObject("mcu");
-    jMcu["uptime"]     = uptime_str.c_str();
-    jMcu["freeHeap"]   = ESP.getFreeHeap();
-    jMcu["heapSize"]   = ESP.getHeapSize();
-    jMcu["cpuFreqMHz"] = ESP.getCpuFreqMHz();
-    jMcu["flashSize"]  = ESP.getFlashChipSize();
-    jMcu["sdkVersion"] = ESP.getSdkVersion();
-
-    String json;
-    serializeJson(doc, json);
-    s_srv->send(200, "application/json", json);
+    String out; serializeJson(doc, out);
+    sendJson(out);
 }
 
-static void handleApiFet() {
-    bool changed = false;
-
-    if (s_srv->hasArg("charge")) {
-        bool on = s_srv->arg("charge") == "1";
-        socLimiterManualFetOverride();  // suspend limiter if active
-        bmsSetChargeFet(on);
-        changed = true;
+static void handleSaveWifi() {
+    if (!s_server->hasArg("plain")) { sendJson("{\"ok\":false,\"err\":\"no body\"}"); return; }
+    DynamicJsonDocument doc(2048);
+    if (deserializeJson(doc, s_server->arg("plain"))) {
+        sendJson("{\"ok\":false,\"err\":\"json\"}"); return;
     }
-    if (s_srv->hasArg("discharge")) {
-        bool on = s_srv->arg("discharge") == "1";
-        bmsSetDischargeFet(on);
-        changed = true;
+    uint8_t cnt = 0;
+    for (JsonObject p : doc["profiles"].as<JsonArray>()) {
+        if (cnt >= MAX_WIFI_PROFILES) break;
+        configSetWifiProfile(cnt++, p["ssid"] | "", p["pass"] | "");
     }
-    if (!changed) {
-        s_srv->send(400, "text/plain", "supply charge= and/or discharge=");
-        return;
-    }
-
-    StaticJsonDocument<64> doc;
-    if (bmsIsDataValid()) {
-        doc["chargeFet"]    = (bool)(bmsGetData().basic.fetStatus & 0x01);
-        doc["dischargeFet"] = (bool)(bmsGetData().basic.fetStatus & 0x02);
-    } else {
-        doc["chargeFet"]    = nullptr;
-        doc["dischargeFet"] = nullptr;
-    }
-    String json;
-    serializeJson(doc, json);
-    s_srv->send(200, "application/json", json);
+    configSetWifiProfileCount(cnt);
+    configSetApEnabled(doc["ap_enabled"] | false);
+    configSetApSsid(doc["ap_ssid"] | "");
+    configSetApPassword(doc["ap_pass"] | "");
+    configSave();
+    wifiApplyConfig();
+    sendJson("{\"ok\":true}");
 }
 
-
-static void handleApiHistory() {
-    uint32_t nowSec  = historyNow();
-    uint32_t toSec   = nowSec;
-    uint32_t fromSec = (nowSec > 300) ? nowSec - 300 : 0;
-
-    if (s_srv->hasArg("from")) {
-        int32_t v = (int32_t)s_srv->arg("from").toInt();
-        fromSec = (v < 0) ? 0 : (uint32_t)v;
+static void handleSaveVictron() {
+    if (!s_server->hasArg("plain")) { sendJson("{\"ok\":false,\"err\":\"no body\"}"); return; }
+    DynamicJsonDocument doc(2048);
+    if (deserializeJson(doc, s_server->arg("plain"))) {
+        sendJson("{\"ok\":false,\"err\":\"json\"}"); return;
     }
-    if (s_srv->hasArg("to")) {
-        int32_t v = (int32_t)s_srv->arg("to").toInt();
-        toSec = (v < 0) ? 0 : (uint32_t)v;
+    uint8_t cnt = 0;
+    for (JsonObject d : doc["devices"].as<JsonArray>()) {
+        if (cnt >= MAX_VICTRON_DEVICES) break;
+        configSetVictronDevice(cnt++, d["name"]|"", d["mac"]|"", d["key"]|"", d["enabled"]|true);
     }
-    if (toSec <= fromSec) toSec = fromSec + 1;
-
-    uint32_t window = toSec - fromSec;
-    uint8_t  tier   = 2;
-    if      (window <= (uint32_t)(HISTORY_T0_CAPACITY * HISTORY_T0_INTERVAL_S)) tier = 0;
-    else if (window <= (uint32_t)(HISTORY_T1_CAPACITY * HISTORY_T1_INTERVAL_S)) tier = 1;
-
-    const RingBuf_t* r = historyGetRingBuf(tier);
-    if (!r) { s_srv->send(500, "text/plain", "bad tier"); return; }
-
-    Serial.printf("[API] /api/history from=%lu to=%lu window=%lus tier=%u count=%u\n",
-        fromSec, toSec, window, tier, r->count);
-
-    s_srv->setContentLength(CONTENT_LENGTH_UNKNOWN);
-    s_srv->send(200, "application/json", "");
-
-    char hdr[160];
-    snprintf(hdr, sizeof(hdr),
-        "{\"tier\":%u,\"interval\":%lu,\"from\":%lu,"
-        "\"to\":%lu,\"now\":%lu,\"points\":[",
-        tier, historyGetInterval(tier), fromSec, toSec, nowSec);
-    s_srv->sendContent(hdr);
-
-    bool firstPoint = true;
-    for (uint16_t i = 0; i < r->count; i++) {
-        uint32_t raw = (uint32_t)r->head + r->capacity - r->count + i;
-        const HistoryPoint& pt = r->buf[raw % r->capacity];
-        if (pt.ts < fromSec || pt.ts > toSec) continue;
-
-        char buf[112];
-        snprintf(buf, sizeof(buf),
-            "%s{\"t\":%lu,\"s\":%u,\"c\":%d,\"v\":[%u,%u,%u,%u],\"u\":%u}",
-            firstPoint ? "" : ",",
-            pt.ts, pt.soc, (int)pt.current_cA,
-            pt.cell_mV[0], pt.cell_mV[1], pt.cell_mV[2], pt.cell_mV[3],
-            pt.voltage_mV);
-        s_srv->sendContent(buf);
-        firstPoint = false;
-    }
-
-    s_srv->sendContent("]}");
-    s_srv->sendContent("");
+    configSetVictronCount(cnt);
+    configSave();
+    victronBleApplyConfig();
+    sendJson("{\"ok\":true}");
 }
 
-// ─── Registration ─────────────────────────────────────────────────────────────
+static void handleSaveMqtt() {
+    if (!s_server->hasArg("plain")) { sendJson("{\"ok\":false,\"err\":\"no body\"}"); return; }
+    DynamicJsonDocument doc(512);
+    if (deserializeJson(doc, s_server->arg("plain"))) {
+        sendJson("{\"ok\":false,\"err\":\"json\"}"); return;
+    }
+    configSetMqttServer(doc["server"]   | "");
+    configSetMqttPort(doc["port"]       | 1883);
+    configSetMqttTopic(doc["topic"]     | "victron");
+    configSetMqttInterval(doc["interval"]|30);
+    configSetMqttEnabled(doc["enabled"] | false);
+    configSave();
+    mqttApplyConfig();
+    sendJson("{\"ok\":true}");
+}
+
+static void handleSaveDisplay() {
+    if (!s_server->hasArg("plain")) { sendJson("{\"ok\":false,\"err\":\"no body\"}"); return; }
+    DynamicJsonDocument doc(256);
+    if (deserializeJson(doc, s_server->arg("plain"))) {
+        sendJson("{\"ok\":false,\"err\":\"json\"}"); return;
+    }
+    configSetBacklight(doc["brightness"]  | 80);
+    configSetDisplayTimeout(doc["timeout"]| 600);
+    configSave();
+    sendJson("{\"ok\":true}");
+}
+
+static void handleReboot() {
+    sendJson("{\"ok\":true}"); delay(300); ESP.restart();
+}
 
 void webApiRegisterRoutes(WebServer& server) {
-    s_srv = &server;
-    server.on("/api/now",          HTTP_GET,  handleApiNow);
-    server.on("/api/data",         HTTP_GET,  handleApiData);
-    server.on("/api/history",      HTTP_GET,  handleApiHistory);
-    server.on("/api/fet",          HTTP_POST, handleApiFet);
-    server.on("/api/status",       HTTP_GET,  handleApiStatus);
-    server.on("/api/config",       HTTP_GET,  handleApiConfigGet);
-    server.on("/api/config/save",  HTTP_POST, handleApiConfigSave);
-    server.on("/api/mqtt/publish", HTTP_POST, handleApiMqttPublish);
-    server.on("/api/screenshot",   HTTP_GET,  handleApiScreenshot);
+    s_server = &server;
+    server.on("/", HTTP_GET, [&server]{
+        server.send_P(200, "text/html", DASHBOARD_HTML);
+    });
+    server.on("/config", HTTP_GET, [&server]{
+        server.send_P(200, "text/html", CONFIG_HTML);
+    });
+    server.on("/api/data",    HTTP_GET,  handleApiData);
+    server.on("/api/wifi",    HTTP_POST, handleSaveWifi);
+    server.on("/api/victron", HTTP_POST, handleSaveVictron);
+    server.on("/api/mqtt",    HTTP_POST, handleSaveMqtt);
+    server.on("/api/display", HTTP_POST, handleSaveDisplay);
+    server.on("/api/reboot",  HTTP_POST, handleReboot);
+    server.onNotFound([&server]{
+        server.send(404, "text/plain", "Not found");
+    });
 }

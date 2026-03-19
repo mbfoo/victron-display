@@ -1,7 +1,6 @@
 #pragma once
 #include <Arduino.h>
 
-// Timing
 #ifndef WIFI_CONNECT_TIMEOUT_MS
 #define WIFI_CONNECT_TIMEOUT_MS  15000
 #endif
@@ -12,33 +11,18 @@
 #define WIFI_MONITOR_INTERVAL_MS  5000
 #endif
 
-enum class WifiState {
-    IDLE,
-    CONNECTING,
-    CONNECTED,
-    WAITING_RETRY,
-    AP          // soft-AP mode active, STA disabled
-};
+enum class WifiState { IDLE, CONNECTING, CONNECTED, WAITING_RETRY, AP };
 
-// Init / task
-void wifiInit();
-void wifiTask();
-
-// Re-apply config at runtime (call after saving AP/STA settings)
-void wifiApplyConfig();
-
-// STA API
+void      wifiInit();
+void      wifiTask();
+void      wifiApplyConfig();
 WifiState wifiGetState();
-bool      wifiIsConnected();   // true only when STA is connected
+bool      wifiIsConnected();
+bool      wifiIsAp();
 String    wifiGetIp();
+String    wifiGetApIp();
 String    wifiGetSsid();
-int8_t    wifiGetRssi();       // dBm, 0 when not connected
-uint32_t  wifiGetUptime();     // seconds connected, 0 when not connected
-void      wifiReconnect();     // force immediate STA reconnect
-
-// AP API
-bool      wifiIsAp();          // true when in AP mode
-String    wifiGetApIp();       // AP IP (192.168.4.1 typically)
-
-// Debug
-void wifiPrint();
+int8_t    wifiGetRssi();
+uint32_t  wifiGetUptime();
+void      wifiReconnect();
+void      wifiPrint();

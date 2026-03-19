@@ -1,87 +1,99 @@
 #pragma once
-#include <Arduino.h>
+#include <stdint.h>
+#include <stdbool.h>
 
-#define CONFIG_MAGIC      0xBEEF
-#define CONFIG_VERSION    12  // bumped for WiFi profiles
-#define MAX_WIFI_PROFILES 10
-#define WIFI_SSID_LEN     32
-#define WIFI_PASS_LEN     64
+#define CFG_MAGIC        0xCAFE
+#define CFG_VERSION      1
+
+#define MAX_WIFI_PROFILES   10
+#define WIFI_SSID_LEN       33
+#define WIFI_PASS_LEN       65
+
+#define MAX_VICTRON_DEVICES 5
+#define VICTRON_NAME_LEN    32
+#define VICTRON_MAC_LEN     18   // "AA:BB:CC:DD:EE:FF\0"
+#define VICTRON_KEY_LEN     33   // 16 bytes hex + null
 
 struct __attribute__((packed)) WifiProfile {
     char ssid[WIFI_SSID_LEN];
     char password[WIFI_PASS_LEN];
 };
 
-struct __attribute__((packed)) ConfigData {
-    uint16_t  magic;
-    uint8_t   version;
-    
-    // WiFi profiles (10 × (32+64)=960 bytes)
-    WifiProfile wifiProfiles[MAX_WIFI_PROFILES];
-    uint8_t     wifiProfileCount;  // 0-10, how many valid profiles
-    
-    // Other settings (unchanged)
-    char bmsDeviceName[32];
-    char mqttServer[64];
-    char mqttTopic[64];
-    uint8_t maxChargeSoc;
-    bool    socLimitEnabled;
-    
-    // AP settings
-    bool    apEnabled;
-    char    apSsid[32];
-    char    apPassword[64];
-    
-    // Other settings...
-    uint8_t  backlightPct;
-    float    estTauSeconds;
-    uint16_t bmsPollInterval;
-    bool     mqttEnabled;
-    uint16_t mqttPort;
-    uint16_t mqttInterval;
-    uint16_t displayTimeout;
+struct __attribute__((packed)) VictronDeviceCfg {
+    char name[VICTRON_NAME_LEN];        // friendly name
+    char mac[VICTRON_MAC_LEN];          // BLE MAC address string
+    char aesKey[VICTRON_KEY_LEN];       // 32-char hex AES key
+    bool enabled;
 };
 
-// Init/load/save
+struct __attribute__((packed)) ConfigData {
+    uint16_t magic;
+    uint8_t  version;
+
+    // WiFi
+    WifiProfile wifiProfiles[MAX_WIFI_PROFILES];
+    uint8_t     wifiProfileCount;
+    bool        apEnabled;
+    char        apSsid[32];
+    char        apPassword[65];
+
+    // Victron devices
+    VictronDeviceCfg victronDevices[MAX_VICTRON_DEVICES];
+    uint8_t          victronDeviceCount;
+
+    // MQTT
+    char     mqttServer[64];
+    char     mqttTopic[64];
+    uint16_t mqttPort;
+    uint16_t mqttInterval;   // seconds
+    bool     mqttEnabled;
+
+    // Display / misc
+    uint8_t  backlightPct;
+    uint16_t displayTimeout; // seconds
+};
+
+// Init / persist
 void configInit();
 void configSave();
 void configPrint();
 
-// Getters
-const ConfigData& configGet();
+// ── WiFi ──────────────────────────────────────────────────────────────────
 uint8_t            configGetWifiProfileCount();
 const WifiProfile& configGetWifiProfile(uint8_t idx);
-const char*        configGetBmsDeviceName();
-const char*        configGetMqttServer();
-const char*        configGetMqttTopic();
-uint8_t            configGetMaxChargeSoc();
-bool               configGetSocLimitEnabled();
+void               configSetWifiProfile(uint8_t idx, const char* ssid, const char* pass);
+void               configSetWifiProfileCount(uint8_t count);
 bool               configGetApEnabled();
+void               configSetApEnabled(bool v);
 const char*        configGetApSsid();
+void               configSetApSsid(const char* v);
 const char*        configGetApPassword();
-uint8_t            configGetBacklight();
-float              configGetEstTau();
-uint16_t           configGetBmsPollInterval();
-bool               configGetMqttEnabled();
-uint16_t           configGetMqttPort();
-uint16_t           configGetMqttInterval();
-uint16_t           configGetDisplayTimeout();
+void               configSetApPassword(const char* v);
 
-// Setters
-void configSetWifiProfile(uint8_t idx, const char* ssid, const char* pass);
-void configSetWifiProfileCount(uint8_t count);
-void configSetBmsDeviceName(const char* v);
-void configSetMqttServer(const char* v);
-void configSetMqttTopic(const char* v);
-void configSetMaxChargeSoc(uint8_t v);
-void configSetSocLimitEnabled(bool v);
-void configSetApEnabled(bool v);
-void configSetApSsid(const char* v);
-void configSetApPassword(const char* v);
-void configSetBacklight(uint8_t v);
-void configSetEstTau(float t);
-void configSetBmsPollInterval(uint16_t v);
-void configSetMqttEnabled(bool v);
-void configSetMqttPort(uint16_t v);
-void configSetMqttInterval(uint16_t v);
-void configSetDisplayTimeout(uint16_t v);
+// ── Victron devices ───────────────────────────────────────────────────────
+uint8_t                 configGetVictronCount();
+void                    configSetVictronCount(uint8_t n);
+const VictronDeviceCfg& configGetVictronDevice(uint8_t idx);
+void                    configSetVictronDevice(uint8_t idx, const char* name,
+                                               const char* mac, const char* aesKey,
+                                               bool enabled);
+
+// ── MQTT ──────────────────────────────────────────────────────────────────
+const char* configGetMqttServer();
+void        configSetMqttServer(const char* v);
+const char* configGetMqttTopic();
+void        configSetMqttTopic(const char* v);
+uint16_t    configGetMqttPort();
+void        configSetMqttPort(uint16_t v);
+uint16_t    configGetMqttInterval();
+void        configSetMqttInterval(uint16_t v);
+bool        configGetMqttEnabled();
+void        configSetMqttEnabled(bool v);
+
+// ── Display ───────────────────────────────────────────────────────────────
+uint8_t  configGetBacklight();
+void     configSetBacklight(uint8_t v);
+uint16_t configGetDisplayTimeout();
+void     configSetDisplayTimeout(uint16_t v);
+
+const ConfigData& configGet();
