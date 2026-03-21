@@ -51,19 +51,28 @@ static const char DASHBOARD_HTML[] PROGMEM = R"rawhtml(
   .badge-warn{background:#b45309;color:#fff}
   .badge-err{background:#b91c1c;color:#fff}
   .badge-off{background:#374151;color:#aaa}
+  .badge-offline{background:#1f2937;color:#9ca3af;border:1px solid #374151}
   .device-list{margin-top:1.5rem}
   .device-card{background:#16213e;border-radius:10px;padding:1rem;margin-bottom:1rem;
-    border-left:4px solid #e94560}
-  .device-card.offline{border-left-color:#374151;opacity:.6}
+    border-left:4px solid #e94560;transition:opacity .3s}
+  .device-card.offline{border-left-color:#374151;opacity:.55}
   .device-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:.75rem}
   .device-name{font-weight:600}
   .device-mac{font-size:.75rem;color:#aaa}
   .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem}
   .metric{text-align:center;background:#0f3460;border-radius:6px;padding:.5rem}
+  .metric.dim{background:#111827}
   .metric-val{font-size:1.1rem;font-weight:600}
+  .metric-val.muted{color:#4b5563}
   .metric-lbl{font-size:.7rem;color:#aaa;margin-top:.15rem}
+  .offline-notice{background:#111827;border-radius:6px;padding:.6rem .9rem;
+    margin-top:.5rem;font-size:.82rem;color:#6b7280;display:flex;
+    align-items:center;gap:.5rem}
+  .offline-dot{width:8px;height:8px;border-radius:50%;background:#374151;
+    flex-shrink:0;display:inline-block}
   .state-bar{background:#0f3460;border-radius:6px;padding:.5rem .75rem;margin-top:.5rem;
     display:flex;justify-content:space-between;font-size:.8rem;flex-wrap:wrap;gap:.25rem}
+  .state-bar.dim{background:#111827;color:#4b5563}
   footer{text-align:center;padding:1.5rem;color:#555;font-size:.8rem}
   .refresh-bar{display:flex;justify-content:flex-end;margin-bottom:1rem;align-items:center;
     gap:.5rem;font-size:.8rem;color:#aaa}
@@ -128,31 +137,60 @@ function fetchData(){
     document.getElementById('wifi-ip').textContent=d.wifi.ip+' | '+d.wifi.rssi+' dBm';
     document.getElementById('mqtt-state').textContent=mqttStates[d.mqtt.state]||'—';
     document.getElementById('mqtt-pub').textContent='publishes: '+d.mqtt.publish_count;
-    document.getElementById('last-update').textContent='Updated: '+new Date().toLocaleTimeString();
+    document.getElementById('last-update').textContent='Updated: '+new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
 
     const list=document.getElementById('device-list');
     list.innerHTML='';
     d.devices.forEach((dev,i)=>{
+      const on=dev.valid;
+      // Metrics: show real values if online, dashes if offline
+      const pvVal   = on ? dev.pv_power_w.toFixed(0)+' W'        : '—';
+      const batVal  = on ? dev.battery_voltage_v.toFixed(2)+' V'  : '—';
+      const curVal  = on ? dev.battery_current_a.toFixed(1)+' A'  : '—';
+      const yldVal  = on ? dev.yield_today_kwh.toFixed(2)+' kWh'  : '—';
+      const rssiVal = on ? dev.rssi+' dBm'                        : '—';
+
+      // Header badge: Offline pill when disconnected, state badge when online
+      const headerBadge = on
+        ? `<span class="badge ${stateClass(dev.charger_state)}">${stateName(dev.charger_state)}</span>`
+        : `<span class="badge badge-offline">&#9679; Offline</span>`;
+
+      // Bottom bar / offline notice
+      const bottomSection = on
+        ? `<div class="state-bar">
+             <span>Yield today: ${yldVal}</span>
+             <span>RSSI: ${rssiVal}</span>
+             ${dev.error_code?'<span style="color:#f87171">Error: '+dev.error_code+'</span>':''}
+           </div>`
+        : `<div class="offline-notice">
+             <span class="offline-dot"></span>
+             No BLE advertisement received for &gt;30 s &mdash; device out of range or powered off
+           </div>`;
+
       list.innerHTML+=`
-      <div class="device-card ${dev.valid?'':'offline'}">
+      <div class="device-card ${on?'':'offline'}">
         <div class="device-header">
-          <div><div class="device-name">${dev.name||'Device '+i}</div>
-          <div class="device-mac">${dev.mac}</div></div>
-          <span class="badge ${stateClass(dev.charger_state)}">${stateName(dev.charger_state)}</span>
+          <div>
+            <div class="device-name">${dev.name||'Device '+i}</div>
+            <div class="device-mac">${dev.mac}</div>
+          </div>
+          ${headerBadge}
         </div>
         <div class="metrics">
-          <div class="metric"><div class="metric-val">${dev.pv_power_w.toFixed(0)} W</div>
-            <div class="metric-lbl">PV Power</div></div>
-          <div class="metric"><div class="metric-val">${dev.battery_voltage_v.toFixed(2)} V</div>
-            <div class="metric-lbl">Battery</div></div>
-          <div class="metric"><div class="metric-val">${dev.battery_current_a.toFixed(1)} A</div>
-            <div class="metric-lbl">Current</div></div>
+          <div class="metric${on?'':' dim'}">
+            <div class="metric-val${on?'':' muted'}">${pvVal}</div>
+            <div class="metric-lbl">PV Power</div>
+          </div>
+          <div class="metric${on?'':' dim'}">
+            <div class="metric-val${on?'':' muted'}">${batVal}</div>
+            <div class="metric-lbl">Battery</div>
+          </div>
+          <div class="metric${on?'':' dim'}">
+            <div class="metric-val${on?'':' muted'}">${curVal}</div>
+            <div class="metric-lbl">Current</div>
+          </div>
         </div>
-        <div class="state-bar">
-          <span>Yield today: ${dev.yield_today_kwh.toFixed(2)} kWh</span>
-          <span>RSSI: ${dev.rssi} dBm</span>
-          ${dev.error_code?'<span style="color:#f87171">Error: '+dev.error_code+'</span>':''}
-        </div>
+        ${bottomSection}
       </div>`;
     });
   }).catch(e=>console.error(e));
@@ -164,7 +202,7 @@ setInterval(fetchData,5000);
 )rawhtml";
 
 // ─────────────────────────────────────────────────────────────────────────
-// Config HTML
+// Config HTML  (unchanged from original)
 // ─────────────────────────────────────────────────────────────────────────
 static const char CONFIG_HTML[] PROGMEM = R"rawhtml(
 <!DOCTYPE html>
@@ -371,7 +409,6 @@ function reboot(){
     fetch('/api/reboot',{method:'POST'}).then(()=>showToast('Rebooting…'));
 }
 
-// Populate from live data
 fetch('/api/data').then(r=>r.json()).then(d=>{
   wifiProfiles=(d.wifi_profiles||[]).map(p=>({ssid:p.ssid,pass:''}));
   renderWifi();
@@ -510,11 +547,11 @@ static void handleSaveMqtt() {
     if (deserializeJson(doc, s_server->arg("plain"))) {
         sendJson("{\"ok\":false,\"err\":\"json\"}"); return;
     }
-    configSetMqttServer(doc["server"]   | "");
-    configSetMqttPort(doc["port"]       | 1883);
-    configSetMqttTopic(doc["topic"]     | "victron");
-    configSetMqttInterval(doc["interval"]|30);
-    configSetMqttEnabled(doc["enabled"] | false);
+    configSetMqttServer(doc["server"]    | "");
+    configSetMqttPort(doc["port"]        | 1883);
+    configSetMqttTopic(doc["topic"]      | "victron");
+    configSetMqttInterval(doc["interval"]| 30);
+    configSetMqttEnabled(doc["enabled"]  | false);
     configSave();
     mqttApplyConfig();
     sendJson("{\"ok\":true}");
@@ -526,8 +563,8 @@ static void handleSaveDisplay() {
     if (deserializeJson(doc, s_server->arg("plain"))) {
         sendJson("{\"ok\":false,\"err\":\"json\"}"); return;
     }
-    configSetBacklight(doc["brightness"]  | 80);
-    configSetDisplayTimeout(doc["timeout"]| 600);
+    configSetBacklight(doc["brightness"]   | 80);
+    configSetDisplayTimeout(doc["timeout"] | 600);
     configSave();
     sendJson("{\"ok\":true}");
 }
