@@ -5,7 +5,7 @@
 static uint32_t s_initMs = 0;
 
 void watchdogInit() {
-    // esp_task_wdt_deinit();
+    esp_task_wdt_deinit();
 
     s_initMs = millis();
     const esp_task_wdt_config_t wdt_cfg = {
