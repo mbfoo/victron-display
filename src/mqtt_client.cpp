@@ -6,6 +6,8 @@
 #include <PubSubClient.h>
 #include <Arduino.h>
 #include "config.h"
+#include "victron_ble.h"
+
 
 static WiFiClient   s_wifiClient;
 static PubSubClient s_mqtt(s_wifiClient);
@@ -15,6 +17,14 @@ static uint32_t  s_lastConnectMs  = 0;
 static uint32_t  s_lastPublishMs  = 0;
 static uint32_t  s_publishCount   = 0;
 static bool      s_publishPending = false;
+
+static char s_topicBuf[128];
+
+static const char* tp(const char* subtopic) {
+    snprintf(s_topicBuf, sizeof(s_topicBuf), "%s/%s",
+             configGetMqttTopic(), subtopic);
+    return s_topicBuf;
+}
 
 static String topic(const String& sub) {
     String t = String(configGetMqttTopic());
@@ -27,41 +37,64 @@ static bool serverConfigured() {
     return s && strlen(s) > 0 && strcmp(s, "0.0.0.0") != 0;
 }
 
-static void pub(const String& t, const String& v, bool retain = false) {
-    if (s_mqtt.connected()) s_mqtt.publish(t.c_str(), v.c_str(), retain);
+static void pub(const char* t, const char* payload, bool retain = false) {
+    if (!s_mqtt.connected()) return;
+    if (!s_mqtt.publish(t, payload, retain))
+        Serial.printf("[MQTT] Publish failed: %s\n", t);
 }
-static void pub(const String& t, float v, int d = 2) { pub(t, String(v, d)); }
-static void pub(const String& t, int32_t v)           { pub(t, String(v)); }
-static void pub(const String& t, uint32_t v)          { pub(t, String(v)); }
-static void pub(const String& t, bool v)              { pub(t, v ? "1" : "0"); }
+
+static void pub(const char* t, float v, unsigned int decimals = 2) {
+    char buf[16];
+    dtostrf(v, 1, decimals, buf);
+    pub(t, buf);
+}
+
+static void pub(const char* t, int32_t v)  { char b[16]; itoa(v, b, 10);  pub(t, b); }
+static void pub(const char* t, uint32_t v) { char b[16]; utoa(v, b, 10);  pub(t, b); }
+static void pub(const char* t, bool v)     { pub(t, v ? "1" : "0"); }
 
 static void publishAll() {
-    uint8_t n = victronBleGetDeviceCount();
     const VictronMpptData* devs = victronBleGetDevices();
-
-    pub(topic("solar/total_pv_power_w"), victronBleGetTotalPvPower(), 0);
-    pub(topic("solar/device_count"),     (int32_t)n);
-
+    uint8_t n = victronBleGetDeviceCount();
     for (uint8_t i = 0; i < n; i++) {
         const VictronMpptData& d = devs[i];
-        String base = "solar/" + String(i) + "/";
-        pub(topic(base + "name"),              String(d.name));
-        pub(topic(base + "valid"),             d.valid);
-        pub(topic(base + "pv_power_w"),        d.pvPower_W, 0);
-        pub(topic(base + "battery_voltage_v"), d.batteryVoltage_V, 2);
-        pub(topic(base + "battery_current_a"), d.batteryCurrent_A, 1);
-        pub(topic(base + "yield_today_kwh"),   d.yieldToday_kWh, 2);
-        pub(topic(base + "charger_state"),     (int32_t)d.chargerState);
-        pub(topic(base + "error_code"),        (int32_t)d.errorCode);
-        pub(topic(base + "rssi_dbm"),          (int32_t)d.rssi);
-    }
+        char sub[64];
 
-    pub(topic("wifi/rssi_dbm"),   (int32_t)wifiGetRssi());
-    pub(topic("wifi/uptime_s"),   wifiGetUptime());
-    pub(topic("wifi/ip"),         wifiGetIp());
-    pub(topic("mcu/uptime_s"),    millis() / 1000UL);
-    pub(topic("mcu/free_heap_b"), (uint32_t)ESP.getFreeHeap());
-    pub(topic("status"),          "online", true);
+        snprintf(sub, sizeof(sub), "solar/%d/name",              i); pub(tp(sub), d.name);
+        snprintf(sub, sizeof(sub), "solar/%d/valid",             i); pub(tp(sub), (int32_t)d.valid);
+        snprintf(sub, sizeof(sub), "solar/%d/pv_power_w",        i); pub(tp(sub), d.pvPower_W, 0);
+        snprintf(sub, sizeof(sub), "solar/%d/battery_voltage_v", i); pub(tp(sub), d.batteryVoltage_V, 2);
+        snprintf(sub, sizeof(sub), "solar/%d/battery_current_a", i); pub(tp(sub), d.batteryCurrent_A, 1);
+        snprintf(sub, sizeof(sub), "solar/%d/yield_today_kwh",   i); pub(tp(sub), d.yieldToday_kWh, 2);
+        snprintf(sub, sizeof(sub), "solar/%d/charger_state",     i); pub(tp(sub), (int32_t)d.chargerState);
+        snprintf(sub, sizeof(sub), "solar/%d/error_code",        i); pub(tp(sub), (int32_t)d.errorCode);
+        snprintf(sub, sizeof(sub), "solar/%d/rssi_dbm",          i); pub(tp(sub), (int32_t)d.rssi);
+    }
+    pub(tp("solar/total_pv_w"), victronBleGetTotalPvPower(), 0);
+
+    pub(tp("wifi/rssi_dbm"),   (int32_t)wifiGetRssi());
+    pub(tp("wifi/uptime_s"),   wifiGetUptime());
+    pub(tp("wifi/ip"),         wifiGetIp());
+    pub(tp("mcu/uptime_s"),    millis() / 1000UL);
+    pub(tp("mcu/free_heap_b"), (uint32_t)ESP.getFreeHeap());
+    pub(tp("status"),          "online", true);
+
+    const VictronMpptData* vdevs = victronBleGetDevices();
+    uint8_t vcount = victronBleGetDeviceCount();
+    for (uint8_t i = 0; i < vcount; i++) {
+        const VictronMpptData& v = vdevs[i];
+        char prefix[48];
+        snprintf(prefix, sizeof(prefix), "victron/%d", i);
+        char subtopic[64];
+
+        snprintf(subtopic, sizeof(subtopic), "%s/valid",   prefix); pub(tp(subtopic), v.valid);
+        snprintf(subtopic, sizeof(subtopic), "%s/pv_w",    prefix); pub(tp(subtopic), v.pvPower_W, 0);
+        snprintf(subtopic, sizeof(subtopic), "%s/bat_v",   prefix); pub(tp(subtopic), v.batteryVoltage_V, 2);
+        snprintf(subtopic, sizeof(subtopic), "%s/bat_a",   prefix); pub(tp(subtopic), v.batteryCurrent_A, 1);
+        snprintf(subtopic, sizeof(subtopic), "%s/yield_kwh",prefix);pub(tp(subtopic), v.yieldToday_kWh, 2);
+        snprintf(subtopic, sizeof(subtopic), "%s/state",   prefix); pub(tp(subtopic), (int32_t)v.chargerState);
+    }
+    pub(tp("victron/total_pv_w"), victronBleGetTotalPvPower(), 0);
 
     s_publishCount++;
     s_lastPublishMs  = millis();
