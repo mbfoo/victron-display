@@ -22,7 +22,7 @@ void setup() {
     configInit();
     configPrint();
 
-    // displayInit();    // no-op
+    displayInit();
 
     watchdogInit();
 
@@ -45,7 +45,7 @@ void loop() {
     webServerTask();
     mqttTask();
 
-    // displayTask();      // no-op
+    displayTask();
 
     static uint32_t lastPrint = 0;
     if (millis() - lastPrint >= 30000) {
