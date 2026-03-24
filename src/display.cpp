@@ -213,6 +213,15 @@ static void buildUi() {
                                   SEL(LV_PART_ITEMS, LV_STATE_CHECKED));
     lv_obj_set_style_border_width(bar, 2, SEL(LV_PART_ITEMS, LV_STATE_CHECKED));
 
+    // Scrollable tab bar: allow swiping when device names are long
+    lv_obj_add_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(bar, LV_DIR_HOR);
+    lv_obj_set_scrollbar_mode(bar, LV_SCROLLBAR_MODE_OFF);
+    // Each tab button gets enough room for ~10 chars at montserrat_16
+    lv_obj_set_style_min_width(bar, 72, LV_PART_ITEMS);
+    lv_obj_set_style_pad_left(bar,  8, LV_PART_ITEMS);
+    lv_obj_set_style_pad_right(bar, 8, LV_PART_ITEMS);
+
     // =========================================================================
     // Tab 0 - SOLAR (no scroll, fixed 144 px)
     // Power font enlarged: montserrat_48_1bpp
@@ -273,6 +282,54 @@ static void buildUi() {
     }
 
     // =========================================================================
+    // Tab SYS (scrollable) - WiFi, IP, MQTT, Uptime, AP toggle,
+    //                        Backlight slider, Display timeout dropdown
+    // =========================================================================
+    lv_obj_t* tabSys = lv_tabview_add_tab(tv, "SYS");
+    lv_obj_set_style_bg_color(tabSys, C(COL_BG), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(tabSys, LV_OPA_COVER, LV_PART_MAIN);
+    ZERO_TAB_PAD(tabSys);
+    lv_obj_add_flag(tabSys, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(tabSys, LV_DIR_VER);
+
+    makeListRow(tabSys,   0, "WiFi",   &s_sysWifi);
+    makeListRow(tabSys,  44, "IP",     &s_sysIp);
+    makeListRow(tabSys,  88, "MQTT",   &s_sysMqtt);
+    makeListRow(tabSys, 132, "Uptime", &s_sysUptime);
+
+    // AP toggle row
+    lv_obj_t* rowAp = makeSettingsRow(tabSys, 176, 54, "WiFi AP mode");
+    s_swAp = makeSwitch(rowAp, 260, 14, cbApSwitch);
+
+    // Backlight slider row (identical to original SET tab row)
+    lv_obj_t* rowBl = makeSettingsRow(tabSys, 230, 54, "Backlight");
+    s_sliderBl = lv_slider_create(rowBl);
+    lv_obj_set_pos(s_sliderBl, 136, 17);
+    lv_obj_set_size(s_sliderBl, 150, 20);
+    lv_slider_set_range(s_sliderBl, 10, 100);
+    lv_slider_set_value(s_sliderBl, 100, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(s_sliderBl, C(COL_BORDER),  LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_sliderBl, C(COL_ACCENT),  LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_sliderBl, C(COL_TEXT),    LV_PART_KNOB);
+    lv_obj_set_style_border_color(s_sliderBl, C(COL_ACCENT), LV_PART_KNOB);
+    lv_obj_set_style_border_width(s_sliderBl, 2, LV_PART_KNOB);
+    lv_obj_add_event_cb(s_sliderBl, cbBacklightSlider, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    // Display timeout dropdown row
+    lv_obj_t* rowTo = makeSettingsRow(tabSys, 284, 54, "Screen off");
+    s_ddTimeout = lv_dropdown_create(rowTo);
+    lv_obj_set_pos(s_ddTimeout, 180, 10);
+    lv_obj_set_size(s_ddTimeout, 132, 40);
+    lv_dropdown_set_options(s_ddTimeout, "1 min\n10 min\n1 hour\n24 hours");
+    lv_dropdown_set_selected(s_ddTimeout, 1);  // default 10 min
+    lv_obj_set_style_bg_color(s_ddTimeout,     C(COL_CARD),   LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_ddTimeout,       LV_OPA_COVER,  LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_ddTimeout,   C(COL_TEXT),   LV_PART_MAIN);
+    lv_obj_set_style_border_color(s_ddTimeout, C(COL_BORDER), LV_PART_MAIN);
+    lv_obj_add_event_cb(s_ddTimeout, cbTimeoutDropdown, LV_EVENT_VALUE_CHANGED, nullptr);
+
+
+    // =========================================================================
     // Tabs 1..N - one per configured device, always present
     // =========================================================================
     for (uint8_t i = 0; i < s_devCount && i < MAX_VICTRON_DEVICES; i++) {
@@ -322,53 +379,6 @@ static void buildUi() {
         makeListRow(tab, 206, "Mode",        &s_devMode[i]);
         makeListRow(tab, 250, "RSSI",        &s_devRssi[i]);
     }
-
-    // =========================================================================
-    // Tab SYS (scrollable) - WiFi, IP, MQTT, Uptime, AP toggle,
-    //                        Backlight slider, Display timeout dropdown
-    // =========================================================================
-    lv_obj_t* tabSys = lv_tabview_add_tab(tv, "SYS");
-    lv_obj_set_style_bg_color(tabSys, C(COL_BG), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(tabSys, LV_OPA_COVER, LV_PART_MAIN);
-    ZERO_TAB_PAD(tabSys);
-    lv_obj_add_flag(tabSys, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(tabSys, LV_DIR_VER);
-
-    makeListRow(tabSys,   0, "WiFi",   &s_sysWifi);
-    makeListRow(tabSys,  44, "IP",     &s_sysIp);
-    makeListRow(tabSys,  88, "MQTT",   &s_sysMqtt);
-    makeListRow(tabSys, 132, "Uptime", &s_sysUptime);
-
-    // AP toggle row
-    lv_obj_t* rowAp = makeSettingsRow(tabSys, 176, 54, "WiFi AP mode");
-    s_swAp = makeSwitch(rowAp, 260, 14, cbApSwitch);
-
-    // Backlight slider row (identical to original SET tab row)
-    lv_obj_t* rowBl = makeSettingsRow(tabSys, 230, 54, "Backlight");
-    s_sliderBl = lv_slider_create(rowBl);
-    lv_obj_set_pos(s_sliderBl, 136, 17);
-    lv_obj_set_size(s_sliderBl, 150, 20);
-    lv_slider_set_range(s_sliderBl, 10, 100);
-    lv_slider_set_value(s_sliderBl, 100, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(s_sliderBl, C(COL_BORDER),  LV_PART_MAIN);
-    lv_obj_set_style_bg_color(s_sliderBl, C(COL_ACCENT),  LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(s_sliderBl, C(COL_TEXT),    LV_PART_KNOB);
-    lv_obj_set_style_border_color(s_sliderBl, C(COL_ACCENT), LV_PART_KNOB);
-    lv_obj_set_style_border_width(s_sliderBl, 2, LV_PART_KNOB);
-    lv_obj_add_event_cb(s_sliderBl, cbBacklightSlider, LV_EVENT_VALUE_CHANGED, nullptr);
-
-    // Display timeout dropdown row
-    lv_obj_t* rowTo = makeSettingsRow(tabSys, 284, 54, "Screen off");
-    s_ddTimeout = lv_dropdown_create(rowTo);
-    lv_obj_set_pos(s_ddTimeout, 180, 10);
-    lv_obj_set_size(s_ddTimeout, 132, 40);
-    lv_dropdown_set_options(s_ddTimeout, "1 min\n10 min\n1 hour\n24 hours");
-    lv_dropdown_set_selected(s_ddTimeout, 1);  // default 10 min
-    lv_obj_set_style_bg_color(s_ddTimeout,     C(COL_CARD),   LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(s_ddTimeout,       LV_OPA_COVER,  LV_PART_MAIN);
-    lv_obj_set_style_text_color(s_ddTimeout,   C(COL_TEXT),   LV_PART_MAIN);
-    lv_obj_set_style_border_color(s_ddTimeout, C(COL_BORDER), LV_PART_MAIN);
-    lv_obj_add_event_cb(s_ddTimeout, cbTimeoutDropdown, LV_EVENT_VALUE_CHANGED, nullptr);
 }
 
 // ---- Charger state helpers --------------------------------------------------
