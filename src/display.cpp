@@ -1,11 +1,15 @@
 /**
- * display.cpp – LVGL 8.x UI for Victron MPPT Monitor
+ * display.cpp - LVGL 8.x UI for Victron MPPT Monitor
  * Waveshare ESP32-C6-LCD-1.47 (320 x 172)
  *
- * Tab layout (28 px tab bar -> 144 px content)
- *   SOLAR  : big total-PV number, battery V/A, charger mode, online count
- *   devN   : one tab per Victron device - PV, Bat V/A, Yield, Mode, RSSI
- *   SYS    : WiFi SSID+RSSI, IP, MQTT, Uptime, AP toggle
+ * Tabs: SOLAR | <dev0> | <dev1> | ... | SYS
+ *
+ * Changes vs previous version:
+ *   - SOLAR: power font enlarged to montserrat_48_1bpp
+ *   - Per-device tabs: created from victronBleGetDevices() array at init time
+ *   - SYS tab: backlight slider + display-timeout dropdown added
+ *   - displayTask: 10 s debounced backlight save (same as original)
+ *   - displayInit/displayApplyConfig: restore slider + dropdown on boot
  */
 
 #include "display.h"
@@ -31,8 +35,9 @@
 static lv_disp_draw_buf_t s_drawBuf;
 static lv_color_t         s_buf1[LVGL_BUF_LEN];
 static lv_color_t         s_buf2[LVGL_BUF_LEN];
-static uint32_t           s_lastRefreshMs = 0;
-static bool               s_forceRefresh  = false;
+static uint32_t           s_lastRefreshMs  = 0;
+static bool               s_forceRefresh   = false;
+static uint32_t           s_blSavePendingMs = 0;  // 0 = nothing pending
 
 // ---- Colour palette ---------------------------------------------------------
 #define C(h) lv_color_hex(h)
@@ -45,12 +50,11 @@ static bool               s_forceRefresh  = false;
 #define COL_GREEN  0x22C55E
 #define COL_ORANGE 0xF59E0B
 #define COL_RED    0xEF4444
-#define COL_YELLOW 0xEDD609
 
 #define SEL(part, state) ((lv_style_selector_t)((uint32_t)(part) | (uint32_t)(state)))
 
 // ---- Widget handles - SOLAR -------------------------------------------------
-static lv_obj_t* s_pvTotal  = nullptr;
+static lv_obj_t* s_pvTotal  = nullptr;  // 48 pt power number
 static lv_obj_t* s_pvBatV   = nullptr;
 static lv_obj_t* s_pvBatA   = nullptr;
 static lv_obj_t* s_pvMode   = nullptr;
@@ -72,6 +76,8 @@ static lv_obj_t* s_sysIp     = nullptr;
 static lv_obj_t* s_sysMqtt   = nullptr;
 static lv_obj_t* s_sysUptime = nullptr;
 static lv_obj_t* s_swAp      = nullptr;
+static lv_obj_t* s_sliderBl  = nullptr;
+static lv_obj_t* s_ddTimeout = nullptr;
 
 // ---- LVGL driver callbacks (identical to original) --------------------------
 
@@ -91,6 +97,22 @@ static void cbApSwitch(lv_event_t* e) {
     configSave();
     wifiApplyConfig();
     s_forceRefresh = true;
+}
+
+static void cbBacklightSlider(lv_event_t* e) {
+    uint8_t val = (uint8_t)lv_slider_get_value((lv_obj_t*)lv_event_get_target(e));
+    lcdSetBacklight(val);
+    configSetBacklight(val);
+    s_blSavePendingMs = millis();  // (re)start 10 s debounce
+}
+
+static void cbTimeoutDropdown(lv_event_t* e) {
+    // "1 min\n10 min\n1 hour\n24 hours" -> indices 0-3
+    static const uint16_t kVals[] = {60, 600, 3600, 65535};
+    uint16_t idx = lv_dropdown_get_selected((lv_obj_t*)lv_event_get_target(e));
+    if (idx > 3) idx = 0;
+    configSetDisplayTimeout(kVals[idx]);
+    configSave();
 }
 
 // ---- UI helpers (same as original) ------------------------------------------
@@ -165,8 +187,8 @@ static lv_obj_t* makeSwitch(lv_obj_t* parent, lv_coord_t x, lv_coord_t y,
     lv_obj_set_style_pad_column((t), 0, LV_PART_MAIN)
 
 static void buildUi() {
-    s_devCount = victronBleGetDeviceCount();
-    const VictronMpptData* devs = victronBleGetDevices();
+    // Use config count so tabs exist even before BLE connects
+    s_devCount = configGet().victronDeviceCount;
 
     lv_obj_t* scr = lv_scr_act();
     lv_obj_set_style_bg_color(scr, C(COL_BG), LV_PART_MAIN);
@@ -193,6 +215,8 @@ static void buildUi() {
 
     // =========================================================================
     // Tab 0 - SOLAR (no scroll, fixed 144 px)
+    // Power font enlarged: montserrat_48_1bpp
+    // Layout: big number top-centre, divider at y=82, 4-col bottom strip
     // =========================================================================
     lv_obj_t* tabSolar = lv_tabview_add_tab(tv, "SOLAR");
     lv_obj_set_style_bg_color(tabSolar, C(COL_BG), LV_PART_MAIN);
@@ -200,14 +224,13 @@ static void buildUi() {
     ZERO_TAB_PAD(tabSolar);
     lv_obj_clear_flag(tabSolar, LV_OBJ_FLAG_SCROLLABLE);
 
-    // Big total PV number
     s_pvTotal = lv_label_create(tabSolar);
     lv_label_set_text(s_pvTotal, "---");
-    lv_obj_set_style_text_font(s_pvTotal, &montserrat_36_1bpp, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_pvTotal, &lv_font_montserrat_48, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_pvTotal, C(COL_ACCENT), LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_pvTotal, C(COL_BG), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_pvTotal, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_pos(s_pvTotal, 70, 10);
+    lv_obj_align(s_pvTotal, LV_ALIGN_TOP_MID, -12, 4);
 
     lv_obj_t* pvUnitLbl = lv_label_create(tabSolar);
     lv_label_set_text(pvUnitLbl, "W  Total PV");
@@ -215,24 +238,23 @@ static void buildUi() {
     lv_obj_set_style_text_color(pvUnitLbl, C(COL_MUTED), LV_PART_MAIN);
     lv_obj_set_style_bg_color(pvUnitLbl, C(COL_BG), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(pvUnitLbl, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_pos(pvUnitLbl, 70, 58);
+    lv_obj_align_to(pvUnitLbl, s_pvTotal, LV_ALIGN_OUT_BOTTOM_MID, 0, 2);
 
-    // Divider
     static lv_point_t divPts[] = {{0, 0}, {316, 0}};
     lv_obj_t* div = lv_line_create(tabSolar);
     lv_line_set_points(div, divPts, 2);
-    lv_obj_set_pos(div, 2, 80);
+    lv_obj_set_pos(div, 2, 82);
     lv_obj_set_style_line_color(div, C(COL_BORDER), LV_PART_MAIN);
     lv_obj_set_style_line_width(div, 1, LV_PART_MAIN);
 
-    // Bottom row: Battery V | Current | Mode | Online
+    // Bottom 4-column strip: Battery V | Current | Mode | Online
     const char*  bkeys[] = { "Battery V", "Current", "Mode", "Online" };
     lv_obj_t**   bvals[] = { &s_pvBatV, &s_pvBatA, &s_pvMode, &s_pvOnline };
     lv_coord_t   bcols[] = { 4, 84, 168, 262 };
     for (int i = 0; i < 4; i++) {
         lv_obj_t* kl = lv_label_create(tabSolar);
         lv_label_set_text(kl, bkeys[i]);
-        lv_obj_set_pos(kl, bcols[i], 86);
+        lv_obj_set_pos(kl, bcols[i], 88);
         lv_obj_set_style_text_font(kl, &montserrat_12_1bpp, LV_PART_MAIN);
         lv_obj_set_style_text_color(kl, C(COL_MUTED), LV_PART_MAIN);
         lv_obj_set_style_bg_color(kl, C(COL_BG), LV_PART_MAIN);
@@ -240,7 +262,7 @@ static void buildUi() {
 
         lv_obj_t* vl = lv_label_create(tabSolar);
         lv_label_set_text(vl, "--");
-        lv_obj_set_pos(vl, bcols[i], 104);
+        lv_obj_set_pos(vl, bcols[i], 106);
         lv_obj_set_size(vl, 76, 20);
         lv_label_set_long_mode(vl, LV_LABEL_LONG_CLIP);
         lv_obj_set_style_text_font(vl, &montserrat_16_1bpp, LV_PART_MAIN);
@@ -251,11 +273,13 @@ static void buildUi() {
     }
 
     // =========================================================================
-    // Tabs 1..N - per-device (scrollable)
+    // Tabs 1..N - one per configured device, always present
     // =========================================================================
     for (uint8_t i = 0; i < s_devCount && i < MAX_VICTRON_DEVICES; i++) {
+        // Name comes from config so it exists before BLE connects
+        const char* devName = configGetVictronDevice(i).name;
         char tabName[8] = {};
-        strncpy(tabName, devs[i].name, 6);
+        strncpy(tabName, devName, 6);
         if (!tabName[0]) snprintf(tabName, sizeof(tabName), "S%d", i + 1);
 
         lv_obj_t* tab = lv_tabview_add_tab(tv, tabName);
@@ -265,7 +289,6 @@ static void buildUi() {
         lv_obj_add_flag(tab, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_scroll_dir(tab, LV_DIR_VER);
 
-        // Header card: full name + online badge
         lv_obj_t* hdr = lv_obj_create(tab);
         lv_obj_set_pos(hdr, 0, 0);
         lv_obj_set_size(hdr, 320, 30);
@@ -279,20 +302,19 @@ static void buildUi() {
         lv_obj_clear_flag(hdr, LV_OBJ_FLAG_SCROLLABLE);
 
         lv_obj_t* nameLbl = lv_label_create(hdr);
-        lv_label_set_text(nameLbl, devs[i].name[0] ? devs[i].name : "Device");
+        lv_label_set_text(nameLbl, devName[0] ? devName : tabName);
         lv_obj_set_pos(nameLbl, 10, 7);
         lv_obj_set_style_text_font(nameLbl, &montserrat_16_1bpp, LV_PART_MAIN);
         lv_obj_set_style_text_color(nameLbl, C(COL_TEXT), LV_PART_MAIN);
 
         s_devBadge[i] = lv_label_create(hdr);
-        lv_label_set_text(s_devBadge[i], "-- --");
-        lv_obj_set_pos(s_devBadge[i], 228, 9);
-        lv_obj_set_size(s_devBadge[i], 84, 16);
+        lv_label_set_text(s_devBadge[i], "Offline");
+        lv_obj_set_pos(s_devBadge[i], 236, 9);
+        lv_obj_set_size(s_devBadge[i], 76, 16);
         lv_label_set_long_mode(s_devBadge[i], LV_LABEL_LONG_CLIP);
         lv_obj_set_style_text_font(s_devBadge[i], &montserrat_12_1bpp, LV_PART_MAIN);
         lv_obj_set_style_text_color(s_devBadge[i], C(COL_MUTED), LV_PART_MAIN);
 
-        // 6 data rows starting at y=30
         makeListRow(tab,  30, "PV Power",    &s_devPv[i]);
         makeListRow(tab,  74, "Battery V",   &s_devBatV[i]);
         makeListRow(tab, 118, "Battery A",   &s_devBatA[i]);
@@ -302,7 +324,8 @@ static void buildUi() {
     }
 
     // =========================================================================
-    // Tab SYS (scrollable)
+    // Tab SYS (scrollable) - WiFi, IP, MQTT, Uptime, AP toggle,
+    //                        Backlight slider, Display timeout dropdown
     // =========================================================================
     lv_obj_t* tabSys = lv_tabview_add_tab(tv, "SYS");
     lv_obj_set_style_bg_color(tabSys, C(COL_BG), LV_PART_MAIN);
@@ -316,8 +339,36 @@ static void buildUi() {
     makeListRow(tabSys,  88, "MQTT",   &s_sysMqtt);
     makeListRow(tabSys, 132, "Uptime", &s_sysUptime);
 
+    // AP toggle row
     lv_obj_t* rowAp = makeSettingsRow(tabSys, 176, 54, "WiFi AP mode");
     s_swAp = makeSwitch(rowAp, 260, 14, cbApSwitch);
+
+    // Backlight slider row (identical to original SET tab row)
+    lv_obj_t* rowBl = makeSettingsRow(tabSys, 230, 54, "Backlight");
+    s_sliderBl = lv_slider_create(rowBl);
+    lv_obj_set_pos(s_sliderBl, 136, 17);
+    lv_obj_set_size(s_sliderBl, 150, 20);
+    lv_slider_set_range(s_sliderBl, 10, 100);
+    lv_slider_set_value(s_sliderBl, 100, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(s_sliderBl, C(COL_BORDER),  LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_sliderBl, C(COL_ACCENT),  LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_sliderBl, C(COL_TEXT),    LV_PART_KNOB);
+    lv_obj_set_style_border_color(s_sliderBl, C(COL_ACCENT), LV_PART_KNOB);
+    lv_obj_set_style_border_width(s_sliderBl, 2, LV_PART_KNOB);
+    lv_obj_add_event_cb(s_sliderBl, cbBacklightSlider, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    // Display timeout dropdown row
+    lv_obj_t* rowTo = makeSettingsRow(tabSys, 284, 54, "Screen off");
+    s_ddTimeout = lv_dropdown_create(rowTo);
+    lv_obj_set_pos(s_ddTimeout, 180, 10);
+    lv_obj_set_size(s_ddTimeout, 132, 40);
+    lv_dropdown_set_options(s_ddTimeout, "1 min\n10 min\n1 hour\n24 hours");
+    lv_dropdown_set_selected(s_ddTimeout, 1);  // default 10 min
+    lv_obj_set_style_bg_color(s_ddTimeout,     C(COL_CARD),   LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_ddTimeout,       LV_OPA_COVER,  LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_ddTimeout,   C(COL_TEXT),   LV_PART_MAIN);
+    lv_obj_set_style_border_color(s_ddTimeout, C(COL_BORDER), LV_PART_MAIN);
+    lv_obj_add_event_cb(s_ddTimeout, cbTimeoutDropdown, LV_EVENT_VALUE_CHANGED, nullptr);
 }
 
 // ---- Charger state helpers --------------------------------------------------
@@ -410,6 +461,7 @@ static void updateDeviceTabs() {
 
     for (uint8_t i = 0; i < s_devCount && i < MAX_VICTRON_DEVICES; i++) {
         if (!s_devPv[i]) continue;
+        // Match by index; BLE device array is also indexed by config slot
         const VictronMpptData& d = devs[i];
 
         if (d.valid) {
@@ -446,7 +498,6 @@ static void updateDeviceTabs() {
         } else {
             lv_label_set_text(s_devBadge[i], "Offline");
             lv_obj_set_style_text_color(s_devBadge[i], C(COL_RED), LV_PART_MAIN);
-
             lv_obj_t* off[] = {
                 s_devPv[i], s_devBatV[i], s_devBatA[i],
                 s_devYield[i], s_devMode[i], s_devRssi[i]
@@ -532,7 +583,20 @@ void displayInit() {
     Serial.printf("[DISP] Free heap after  buildUi: %lu bytes\n",
                   (unsigned long)ESP.getFreeHeap());
 
-    lcdSetBacklight(configGetBacklight());
+    // Restore settings from config
+    uint8_t bl = configGetBacklight();
+    lcdSetBacklight(bl);
+    if (s_sliderBl) lv_slider_set_value(s_sliderBl, bl, LV_ANIM_OFF);
+
+    if (s_ddTimeout) {
+        static const uint16_t kVals[] = {60, 600, 3600, 65535};
+        uint16_t stored = configGetDisplayTimeout();
+        uint8_t idx = 1;  // default 10 min
+        for (uint8_t i = 0; i < 4; i++) {
+            if (kVals[i] == stored) { idx = i; break; }
+        }
+        lv_dropdown_set_selected(s_ddTimeout, idx);
+    }
 
     if (s_swAp) {
         configGetApEnabled()
@@ -546,6 +610,14 @@ void displayInit() {
 
 void displayTask() {
     lv_timer_handler();
+
+    // Deferred backlight EEPROM save - 10 s after last slider movement
+    if (s_blSavePendingMs != 0 && (millis() - s_blSavePendingMs) >= 10000UL) {
+        s_blSavePendingMs = 0;
+        configSave();
+        Serial.println("[DISP] Backlight saved to EEPROM");
+    }
+
     uint32_t now = millis();
     if (s_forceRefresh || (now - s_lastRefreshMs >= DISPLAY_REFRESH_MS)) {
         s_lastRefreshMs = now;
@@ -559,10 +631,22 @@ void displayTask() {
 void displayRefresh() { s_forceRefresh = true; }
 
 void displayApplyConfig() {
-    if (!s_swAp) return;
+    if (!s_swAp || !s_sliderBl || !s_ddTimeout) return;
+
     lcdSetBacklight(configGetBacklight());
+    lv_slider_set_value(s_sliderBl, configGetBacklight(), LV_ANIM_OFF);
+
+    static const uint16_t kVals[] = {60, 600, 3600, 65535};
+    uint16_t stored = configGetDisplayTimeout();
+    uint8_t idx = 1;
+    for (uint8_t i = 0; i < 4; i++) {
+        if (kVals[i] == stored) { idx = i; break; }
+    }
+    lv_dropdown_set_selected(s_ddTimeout, idx);
+
     configGetApEnabled()
         ? lv_obj_add_state(s_swAp, LV_STATE_CHECKED)
         : lv_obj_clear_state(s_swAp, LV_STATE_CHECKED);
+
     s_forceRefresh = true;
 }
