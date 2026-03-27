@@ -37,6 +37,18 @@ static lv_color_t         s_buf1[LVGL_BUF_LEN];
 static lv_color_t         s_buf2[LVGL_BUF_LEN];
 static uint32_t           s_lastRefreshMs  = 0;
 static bool               s_forceRefresh   = false;
+
+// ─── Widget handles ── DETAIL ─────────────────────────────────────────────────
+static lv_obj_t* s_ddDetailDev  = nullptr;
+static lv_obj_t* s_dtPv         = nullptr;
+static lv_obj_t* s_dtBatV       = nullptr;
+static lv_obj_t* s_dtBatA       = nullptr;
+static lv_obj_t* s_dtYield      = nullptr;
+static lv_obj_t* s_dtMode       = nullptr;
+static lv_obj_t* s_dtRssi       = nullptr;
+static lv_obj_t* s_dtBadge      = nullptr;
+static uint8_t   s_detailSelIdx = 0;
+
 static uint32_t           s_blSavePendingMs = 0;  // 0 = nothing pending
 
 // ---- Colour palette ---------------------------------------------------------
@@ -113,6 +125,11 @@ static void cbTimeoutDropdown(lv_event_t* e) {
     if (idx > 3) idx = 0;
     configSetDisplayTimeout(kVals[idx]);
     configSave();
+}
+
+static void cbDetailDevDropdown(lv_event_t* e) {
+    s_detailSelIdx = (uint8_t)lv_dropdown_get_selected(
+        (lv_obj_t*)lv_event_get_target(e));
 }
 
 // ---- UI helpers (same as original) ------------------------------------------
@@ -213,18 +230,9 @@ static void buildUi() {
                                   SEL(LV_PART_ITEMS, LV_STATE_CHECKED));
     lv_obj_set_style_border_width(bar, 2, SEL(LV_PART_ITEMS, LV_STATE_CHECKED));
 
-    // Scrollable tab bar: allow swiping when device names are long
-    lv_obj_add_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(bar, LV_DIR_HOR);
-    lv_obj_set_scrollbar_mode(bar, LV_SCROLLBAR_MODE_OFF);
-    // Each tab button gets enough room for ~10 chars at montserrat_16
-    lv_obj_set_style_min_width(bar, 72, LV_PART_ITEMS);
-    lv_obj_set_style_pad_left(bar,  8, LV_PART_ITEMS);
-    lv_obj_set_style_pad_right(bar, 8, LV_PART_ITEMS);
-
     // =========================================================================
     // Tab 0 - SOLAR (no scroll, fixed 144 px)
-    // Power font enlarged: montserrat_48_1bpp
+    // Power font enlarged: montserrat_36_1bpp
     // Layout: big number top-centre, divider at y=82, 4-col bottom strip
     // =========================================================================
     lv_obj_t* tabSolar = lv_tabview_add_tab(tv, "SOLAR");
@@ -235,7 +243,7 @@ static void buildUi() {
 
     s_pvTotal = lv_label_create(tabSolar);
     lv_label_set_text(s_pvTotal, "---");
-    lv_obj_set_style_text_font(s_pvTotal, &lv_font_montserrat_48, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_pvTotal, &montserrat_64_1bpp, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_pvTotal, C(COL_ACCENT), LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_pvTotal, C(COL_BG), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_pvTotal, LV_OPA_COVER, LV_PART_MAIN);
@@ -252,7 +260,7 @@ static void buildUi() {
     static lv_point_t divPts[] = {{0, 0}, {316, 0}};
     lv_obj_t* div = lv_line_create(tabSolar);
     lv_line_set_points(div, divPts, 2);
-    lv_obj_set_pos(div, 2, 82);
+    lv_obj_set_pos(div, 2, 95);
     lv_obj_set_style_line_color(div, C(COL_BORDER), LV_PART_MAIN);
     lv_obj_set_style_line_width(div, 1, LV_PART_MAIN);
 
@@ -263,7 +271,7 @@ static void buildUi() {
     for (int i = 0; i < 4; i++) {
         lv_obj_t* kl = lv_label_create(tabSolar);
         lv_label_set_text(kl, bkeys[i]);
-        lv_obj_set_pos(kl, bcols[i], 88);
+        lv_obj_set_pos(kl, bcols[i], 101);
         lv_obj_set_style_text_font(kl, &montserrat_12_1bpp, LV_PART_MAIN);
         lv_obj_set_style_text_color(kl, C(COL_MUTED), LV_PART_MAIN);
         lv_obj_set_style_bg_color(kl, C(COL_BG), LV_PART_MAIN);
@@ -271,7 +279,7 @@ static void buildUi() {
 
         lv_obj_t* vl = lv_label_create(tabSolar);
         lv_label_set_text(vl, "--");
-        lv_obj_set_pos(vl, bcols[i], 106);
+        lv_obj_set_pos(vl, bcols[i], 118);
         lv_obj_set_size(vl, 76, 20);
         lv_label_set_long_mode(vl, LV_LABEL_LONG_CLIP);
         lv_obj_set_style_text_font(vl, &montserrat_16_1bpp, LV_PART_MAIN);
@@ -280,6 +288,7 @@ static void buildUi() {
         lv_obj_set_style_bg_opa(vl, LV_OPA_COVER, LV_PART_MAIN);
         *bvals[i] = vl;
     }
+
 
     // =========================================================================
     // Tab SYS (scrollable) - WiFi, IP, MQTT, Uptime, AP toggle,
@@ -328,57 +337,55 @@ static void buildUi() {
     lv_obj_set_style_border_color(s_ddTimeout, C(COL_BORDER), LV_PART_MAIN);
     lv_obj_add_event_cb(s_ddTimeout, cbTimeoutDropdown, LV_EVENT_VALUE_CHANGED, nullptr);
 
+    // ══════════════════════════════════════════════════════════════════════
+    // Tab – DETAIL
+    // ══════════════════════════════════════════════════════════════════════
+    lv_obj_t* tabDetail = lv_tabview_add_tab(tv, "DETAIL");
+    lv_obj_set_style_bg_color(tabDetail, C(COL_BG), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(tabDetail, LV_OPA_COVER, LV_PART_MAIN);
+    ZERO_TAB_PAD(tabDetail);
+    lv_obj_add_flag(tabDetail, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(tabDetail, LV_DIR_VER);
 
-    // =========================================================================
-    // Tabs 1..N - one per configured device, always present
-    // =========================================================================
-    for (uint8_t i = 0; i < s_devCount && i < MAX_VICTRON_DEVICES; i++) {
-        // Name comes from config so it exists before BLE connects
-        const char* devName = configGetVictronDevice(i).name;
-        char tabName[8] = {};
-        strncpy(tabName, devName, 6);
-        if (!tabName[0]) snprintf(tabName, sizeof(tabName), "S%d", i + 1);
-
-        lv_obj_t* tab = lv_tabview_add_tab(tv, tabName);
-        lv_obj_set_style_bg_color(tab, C(COL_BG), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(tab, LV_OPA_COVER, LV_PART_MAIN);
-        ZERO_TAB_PAD(tab);
-        lv_obj_add_flag(tab, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_scroll_dir(tab, LV_DIR_VER);
-
-        lv_obj_t* hdr = lv_obj_create(tab);
-        lv_obj_set_pos(hdr, 0, 0);
-        lv_obj_set_size(hdr, 320, 30);
-        lv_obj_set_style_bg_color(hdr, C(COL_CARD), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(hdr, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_border_width(hdr, 0, LV_PART_MAIN);
-        lv_obj_set_style_border_side(hdr, LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
-        lv_obj_set_style_border_color(hdr, C(COL_BORDER), LV_PART_MAIN);
-        lv_obj_set_style_border_width(hdr, 1, LV_PART_MAIN);
-        lv_obj_set_style_pad_all(hdr, 0, LV_PART_MAIN);
-        lv_obj_clear_flag(hdr, LV_OBJ_FLAG_SCROLLABLE);
-
-        lv_obj_t* nameLbl = lv_label_create(hdr);
-        lv_label_set_text(nameLbl, devName[0] ? devName : tabName);
-        lv_obj_set_pos(nameLbl, 10, 7);
-        lv_obj_set_style_text_font(nameLbl, &montserrat_16_1bpp, LV_PART_MAIN);
-        lv_obj_set_style_text_color(nameLbl, C(COL_TEXT), LV_PART_MAIN);
-
-        s_devBadge[i] = lv_label_create(hdr);
-        lv_label_set_text(s_devBadge[i], "Offline");
-        lv_obj_set_pos(s_devBadge[i], 236, 9);
-        lv_obj_set_size(s_devBadge[i], 76, 16);
-        lv_label_set_long_mode(s_devBadge[i], LV_LABEL_LONG_CLIP);
-        lv_obj_set_style_text_font(s_devBadge[i], &montserrat_12_1bpp, LV_PART_MAIN);
-        lv_obj_set_style_text_color(s_devBadge[i], C(COL_MUTED), LV_PART_MAIN);
-
-        makeListRow(tab,  30, "PV Power",    &s_devPv[i]);
-        makeListRow(tab,  74, "Battery V",   &s_devBatV[i]);
-        makeListRow(tab, 118, "Battery A",   &s_devBatA[i]);
-        makeListRow(tab, 162, "Yield today", &s_devYield[i]);
-        makeListRow(tab, 206, "Mode",        &s_devMode[i]);
-        makeListRow(tab, 250, "RSSI",        &s_devRssi[i]);
+    // Build dropdown option string from config
+    {
+        char opts[MAX_VICTRON_DEVICES * (VICTRON_NAME_LEN + 1) + 4] = {};
+        uint8_t ndev = configGet().victronDeviceCount;
+        if (ndev == 0) {
+            strncpy(opts, "No devices", sizeof(opts) - 1);
+        } else {
+            for (uint8_t i = 0; i < ndev; i++) {
+                const char* nm = configGetVictronDevice(i).name;
+                if (i > 0) strncat(opts, "\n", sizeof(opts) - strlen(opts) - 1);
+                if (nm && nm[0]) strncat(opts, nm, sizeof(opts) - strlen(opts) - 1);
+                else { char t[8]; snprintf(t, sizeof(t), "Dev%d", i+1);
+                       strncat(opts, t, sizeof(opts) - strlen(opts) - 1); }
+            }
+        }
+        lv_obj_t* hdr = makeSettingsRow(tabDetail, 0, 44, "Device");
+        s_ddDetailDev = lv_dropdown_create(hdr);
+        lv_obj_set_pos(s_ddDetailDev, 112, 6);
+        lv_obj_set_size(s_ddDetailDev, 200, 36);
+        lv_dropdown_set_options(s_ddDetailDev, opts);
+        lv_dropdown_set_selected(s_ddDetailDev, 0);
+        lv_obj_set_style_bg_color(s_ddDetailDev,     C(COL_CARD),   LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(s_ddDetailDev,       LV_OPA_COVER,  LV_PART_MAIN);
+        lv_obj_set_style_text_color(s_ddDetailDev,   C(COL_TEXT),   LV_PART_MAIN);
+        lv_obj_set_style_border_color(s_ddDetailDev, C(COL_BORDER), LV_PART_MAIN);
+        lv_obj_add_event_cb(s_ddDetailDev, cbDetailDevDropdown,
+                            LV_EVENT_VALUE_CHANGED, nullptr);
     }
+
+    s_dtBadge = lv_label_create(tabDetail);
+    lv_obj_set_pos(s_dtBadge, 240, 12);
+    lv_label_set_text(s_dtBadge, "");
+
+    makeListRow(tabDetail,  44, "PV Power",    &s_dtPv);
+    makeListRow(tabDetail,  88, "Battery V",   &s_dtBatV);
+    makeListRow(tabDetail, 132, "Battery A",   &s_dtBatA);
+    makeListRow(tabDetail, 176, "Yield today", &s_dtYield);
+    makeListRow(tabDetail, 220, "Mode",        &s_dtMode);
+    makeListRow(tabDetail, 264, "RSSI",        &s_dtRssi);
 }
 
 // ---- Charger state helpers --------------------------------------------------
@@ -554,6 +561,58 @@ static void updateSysTab() {
     lv_obj_set_style_text_color(s_sysUptime, C(COL_TEXT), LV_PART_MAIN);
 }
 
+static void updateDetailTab() {
+    if (!s_dtPv) return;
+    char buf[32];
+    const VictronMpptData* devs = victronBleGetDevices();
+    uint8_t idx = s_detailSelIdx;
+    if (idx >= victronBleGetDeviceCount()) {
+        lv_label_set_text(s_dtBadge, "No device");
+        lv_label_set_text(s_dtPv, "--"); lv_label_set_text(s_dtBatV, "--");
+        lv_label_set_text(s_dtBatA, "--"); lv_label_set_text(s_dtYield, "--");
+        lv_label_set_text(s_dtMode, "--"); lv_label_set_text(s_dtRssi, "--");
+        return;
+    }
+    const VictronMpptData& d = devs[idx];
+    bool online = d.valid && (millis() - d.lastUpdateMs < 15000);
+
+    lv_label_set_text(s_dtBadge, online ? "Online" : "Offline");
+    lv_obj_set_style_text_color(s_dtBadge,
+        online ? C(COL_GREEN) : C(COL_RED), LV_PART_MAIN);
+
+    if (online) {
+        snprintf(buf, sizeof(buf), "%.0f W", d.pvPower_W);
+        lv_label_set_text(s_dtPv, buf);
+        lv_obj_set_style_text_color(s_dtPv,
+            d.pvPower_W > 0 ? C(COL_ACCENT) : C(COL_MUTED), LV_PART_MAIN);
+
+        snprintf(buf, sizeof(buf), "%.2f V", d.batteryVoltage_V);
+        lv_label_set_text(s_dtBatV, buf);
+        lv_obj_set_style_text_color(s_dtBatV, C(COL_TEXT), LV_PART_MAIN);
+
+        snprintf(buf, sizeof(buf), "%.2f A", d.batteryCurrent_A);
+        lv_label_set_text(s_dtBatA, buf);
+        lv_obj_set_style_text_color(s_dtBatA, C(COL_TEXT), LV_PART_MAIN);
+
+        snprintf(buf, sizeof(buf), "%.2f Wh", d.yieldToday_kWh * 1000.0f);
+        lv_label_set_text(s_dtYield, buf);
+        lv_obj_set_style_text_color(s_dtYield, C(COL_TEXT), LV_PART_MAIN);
+
+        lv_label_set_text(s_dtMode, chargerStateName((int)d.chargerState));
+        lv_obj_set_style_text_color(s_dtMode, stateColor((int)d.chargerState), LV_PART_MAIN);;
+
+        snprintf(buf, sizeof(buf), "%d dBm", d.rssi);
+        lv_label_set_text(s_dtRssi, buf);
+        lv_obj_set_style_text_color(s_dtRssi,
+            d.rssi > -70 ? C(COL_GREEN) : d.rssi > -85 ?
+            C(COL_ORANGE) : C(COL_RED), LV_PART_MAIN);
+    } else {
+        lv_label_set_text(s_dtPv, "--"); lv_label_set_text(s_dtBatV, "--");
+        lv_label_set_text(s_dtBatA, "--"); lv_label_set_text(s_dtYield, "--");
+        lv_label_set_text(s_dtMode, "--"); lv_label_set_text(s_dtRssi, "--");
+    }
+}
+
 // ---- Public API (identical signatures to original) --------------------------
 
 void displayInit() {
@@ -635,6 +694,7 @@ void displayTask() {
         updateSolarTab();
         updateDeviceTabs();
         updateSysTab();
+        updateDetailTab();
     }
 }
 
