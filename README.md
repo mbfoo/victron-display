@@ -36,9 +36,9 @@ The project uses **PlatformIO**. No Arduino IDE setup is required.
 git clone https://github.com/mbfoo/victron-display.git
 cd bms-monitor
 
-# 2. Copy and edit config.sample.h
-cp config.sample.h config.h
-vim config.h
+# 2. Copy and edit defaults in config.sample.h
+cp src/config.sample.h src/config.h
+vim src/config.h
 
 # 3. Build
 pio run
