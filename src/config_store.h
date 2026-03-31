@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>   // size_t
 
 #define CFG_MAGIC        0xCAFE
 #define CFG_VERSION      2   // bumped for MQTT TLS fields
