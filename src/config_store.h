@@ -3,7 +3,7 @@
 #include <stdbool.h>
 
 #define CFG_MAGIC        0xCAFE
-#define CFG_VERSION      1
+#define CFG_VERSION      2   // bumped for MQTT TLS fields
 
 #define MAX_WIFI_PROFILES   10
 #define WIFI_SSID_LEN       33
@@ -13,6 +13,10 @@
 #define VICTRON_NAME_LEN    32
 #define VICTRON_MAC_LEN     18   // "AA:BB:CC:DD:EE:FF\0"
 #define VICTRON_KEY_LEN     33   // 16 bytes hex + null
+
+// CA cert stored separately after ConfigData in EEPROM
+#define MQTT_CA_CERT_MAX_LEN       2048
+#define MQTT_CA_CERT_EEPROM_OFFSET sizeof(ConfigData)
 
 struct __attribute__((packed)) WifiProfile {
     char ssid[WIFI_SSID_LEN];
@@ -47,6 +51,11 @@ struct __attribute__((packed)) ConfigData {
     uint16_t mqttPort;
     uint16_t mqttInterval;   // seconds
     bool     mqttEnabled;
+
+    // MQTT TLS / auth
+    bool     mqttTlsEnabled;
+    char     mqttUsername[64];
+    char     mqttPassword[64];
 
     // Display / misc
     uint8_t  backlightPct;
@@ -89,6 +98,16 @@ uint16_t    configGetMqttInterval();
 void        configSetMqttInterval(uint16_t v);
 bool        configGetMqttEnabled();
 void        configSetMqttEnabled(bool v);
+
+// MQTT TLS / auth
+bool        configGetMqttTlsEnabled();
+void        configSetMqttTlsEnabled(bool v);
+const char* configGetMqttUsername();
+void        configSetMqttUsername(const char* v);
+const char* configGetMqttPassword();
+void        configSetMqttPassword(const char* v);
+void        configGetMqttCaCert(char* buf, size_t bufLen); // reads from EEPROM
+void        configSetMqttCaCert(const char* pem);          // writes directly to EEPROM
 
 // ── Display ───────────────────────────────────────────────────────────────
 uint8_t  configGetBacklight();

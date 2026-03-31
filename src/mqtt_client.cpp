@@ -3,14 +3,16 @@
 #include "wifi_manager.h"
 #include "victron_ble.h"
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <Arduino.h>
 #include "config.h"
 #include "victron_ble.h"
 
 
-static WiFiClient   s_wifiClient;
-static PubSubClient s_mqtt(s_wifiClient);
+static WiFiClient        s_wifiClient;
+static WiFiClientSecure* s_wifiClientSecure = nullptr;
+static PubSubClient      s_mqtt(s_wifiClient);
 
 static MqttState s_state          = MqttState::WAITING_FOR_WIFI;
 static uint32_t  s_lastConnectMs  = 0;
@@ -18,6 +20,7 @@ static uint32_t  s_lastPublishMs  = 0;
 static uint32_t  s_publishCount   = 0;
 static bool      s_publishPending = false;
 
+static char s_caCert[MQTT_CA_CERT_MAX_LEN];
 static char s_topicBuf[128];
 
 static const char* tp(const char* subtopic) {
@@ -104,16 +107,61 @@ static void publishAll() {
 
 static void beginConnect() {
     const char* srv = configGetMqttServer();
+
+    // Heap guard: TLS handshake needs ~48 KB free
+    if (configGetMqttTlsEnabled() && ESP.getFreeHeap() < 48000) {
+        Serial.printf("[MQTT] Insufficient heap for TLS (%lu bytes free), retry later\n",
+                      ESP.getFreeHeap());
+        s_state = MqttState::DISCONNECTED;
+        s_lastConnectMs = millis();
+        return;
+    }
+
+    if (configGetMqttTlsEnabled()) {
+        // Tear down previous instance first to free memory before allocating new one
+        if (s_wifiClientSecure) {
+            delete s_wifiClientSecure;
+            s_wifiClientSecure = nullptr;
+        }
+        Serial.printf("[MQTT] Free heap before TLS alloc: %lu\n", ESP.getFreeHeap());
+        s_wifiClientSecure = new WiFiClientSecure();
+        if (!s_wifiClientSecure) {
+            Serial.println("[MQTT] Failed to allocate WiFiClientSecure");
+            s_state = MqttState::DISCONNECTED;
+            s_lastConnectMs = millis();
+            return;
+        }
+        configGetMqttCaCert(s_caCert, sizeof(s_caCert));
+        if (strlen(s_caCert) > 0) {
+            s_wifiClientSecure->setCACert(s_caCert);
+        } else {
+            s_wifiClientSecure->setInsecure();
+        }
+        s_mqtt.setClient(*s_wifiClientSecure);
+    } else {
+        // Free the secure client if TLS was previously used
+        if (s_wifiClientSecure) {
+            delete s_wifiClientSecure;
+            s_wifiClientSecure = nullptr;
+        }
+        s_mqtt.setClient(s_wifiClient);
+    }
+
     s_mqtt.setServer(srv, configGetMqttPort());
     s_mqtt.setKeepAlive(60);
-    s_mqtt.setSocketTimeout(5);
+    s_mqtt.setSocketTimeout(10);   // TLS handshake needs more time
+
+    const char* user = strlen(configGetMqttUsername()) > 0 ? configGetMqttUsername() : nullptr;
+    const char* pass = strlen(configGetMqttPassword()) > 0 ? configGetMqttPassword() : nullptr;
+
     String lwt = topic("status");
-    bool ok = s_mqtt.connect(CONFIG_MQTT_CLIENT_ID, nullptr, nullptr,
+    bool ok = s_mqtt.connect(CONFIG_MQTT_CLIENT_ID, user, pass,
                               lwt.c_str(), 0, true, "offline");
     if (ok) {
         s_state = MqttState::CONNECTED;
         s_publishPending = true;
-        Serial.println("[MQTT] Connected");
+        Serial.printf("[MQTT] Connected to %s  tls=%s\n", srv,
+                      configGetMqttTlsEnabled() ? "YES" : "NO");
     } else {
         Serial.printf("[MQTT] Failed rc=%d\n", s_mqtt.state());
         s_state = MqttState::DISCONNECTED;
@@ -156,8 +204,12 @@ void mqttTask() {
     }
 }
 
-void     mqttApplyConfig()     {
+void mqttApplyConfig() {
     if (s_mqtt.connected()) s_mqtt.disconnect();
+    if (s_wifiClientSecure) {
+        delete s_wifiClientSecure;
+        s_wifiClientSecure = nullptr;
+    }
     s_state = (!configGetMqttEnabled() || !serverConfigured())
               ? MqttState::MQTT_DISABLED : MqttState::WAITING_FOR_WIFI;
     s_lastConnectMs = 0;
@@ -168,5 +220,6 @@ bool      mqttIsConnected()    { return s_state == MqttState::CONNECTED && s_mqt
 uint32_t  mqttGetPublishCount(){ return s_publishCount; }
 void      mqttPrint() {
     static const char* str[] = {"DISABLED","WAIT_WIFI","CONNECTING","CONNECTED","DISCONNECTED"};
-    Serial.printf("[MQTT] %s pub=%lu\n", str[(int)s_state], s_publishCount);
+    Serial.printf("[MQTT] %s pub=%lu tls=%s\n", str[(int)s_state], s_publishCount,
+                  configGetMqttTlsEnabled() ? "YES" : "NO");
 }
