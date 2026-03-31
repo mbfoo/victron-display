@@ -178,16 +178,16 @@ void        configSetMqttPassword(const char* v) {
     strncpy(s_cfg.mqttPassword, v ? v : "", sizeof(s_cfg.mqttPassword)-1);
     s_cfg.mqttPassword[sizeof(s_cfg.mqttPassword)-1] = 0;
 }
-void configGetMqttCaCert(char* buf, size_t bufLen) {
-    size_t n = (bufLen < MQTT_CA_CERT_MAX_LEN) ? bufLen : MQTT_CA_CERT_MAX_LEN;
-    for (size_t i = 0; i < n; i++)
+void configGetMqttCaCert(char* buf, uint16_t bufLen) {
+    uint16_t n = (bufLen < MQTT_CA_CERT_MAX_LEN) ? bufLen : MQTT_CA_CERT_MAX_LEN;
+    for (uint16_t i = 0; i < n; i++)
         buf[i] = EEPROM.read(MQTT_CA_CERT_EEPROM_OFFSET + i);
     buf[n - 1] = '\0';
 }
 void configSetMqttCaCert(const char* pem) {
-    size_t n = strlen(pem);
+    uint16_t n = (uint16_t)strlen(pem);
     if (n >= MQTT_CA_CERT_MAX_LEN) n = MQTT_CA_CERT_MAX_LEN - 1;
-    for (size_t i = 0; i < n; i++)
+    for (uint16_t i = 0; i < n; i++)
         EEPROM.write(MQTT_CA_CERT_EEPROM_OFFSET + i, pem[i]);
     EEPROM.write(MQTT_CA_CERT_EEPROM_OFFSET + n, 0);
     EEPROM.commit();

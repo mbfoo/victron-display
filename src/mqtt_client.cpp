@@ -7,8 +7,6 @@
 #include <PubSubClient.h>
 #include <Arduino.h>
 #include "config.h"
-#include "victron_ble.h"
-
 
 static WiFiClient        s_wifiClient;
 static WiFiClientSecure* s_wifiClientSecure = nullptr;
@@ -62,7 +60,6 @@ static void publishAll() {
     for (uint8_t i = 0; i < n; i++) {
         const VictronMpptData& d = devs[i];
         char sub[64];
-
         snprintf(sub, sizeof(sub), "solar/%d/name",              i); pub(tp(sub), d.name);
         snprintf(sub, sizeof(sub), "solar/%d/valid",             i); pub(tp(sub), (int32_t)d.valid);
         snprintf(sub, sizeof(sub), "solar/%d/pv_power_w",        i); pub(tp(sub), d.pvPower_W, 0);
@@ -74,31 +71,12 @@ static void publishAll() {
         snprintf(sub, sizeof(sub), "solar/%d/rssi_dbm",          i); pub(tp(sub), (int32_t)d.rssi);
     }
     pub(tp("solar/total_pv_w"), victronBleGetTotalPvPower(), 0);
-
     pub(tp("wifi/rssi_dbm"),   (int32_t)wifiGetRssi());
     pub(tp("wifi/uptime_s"),   wifiGetUptime());
     pub(tp("wifi/ip"),         wifiGetIp());
     pub(tp("mcu/uptime_s"),    millis() / 1000UL);
     pub(tp("mcu/free_heap_b"), (uint32_t)ESP.getFreeHeap());
     pub(tp("status"),          "online", true);
-
-    const VictronMpptData* vdevs = victronBleGetDevices();
-    uint8_t vcount = victronBleGetDeviceCount();
-    for (uint8_t i = 0; i < vcount; i++) {
-        const VictronMpptData& v = vdevs[i];
-        char prefix[48];
-        snprintf(prefix, sizeof(prefix), "victron/%d", i);
-        char subtopic[64];
-
-        snprintf(subtopic, sizeof(subtopic), "%s/valid",   prefix); pub(tp(subtopic), v.valid);
-        snprintf(subtopic, sizeof(subtopic), "%s/pv_w",    prefix); pub(tp(subtopic), v.pvPower_W, 0);
-        snprintf(subtopic, sizeof(subtopic), "%s/bat_v",   prefix); pub(tp(subtopic), v.batteryVoltage_V, 2);
-        snprintf(subtopic, sizeof(subtopic), "%s/bat_a",   prefix); pub(tp(subtopic), v.batteryCurrent_A, 1);
-        snprintf(subtopic, sizeof(subtopic), "%s/yield_kwh",prefix);pub(tp(subtopic), v.yieldToday_kWh, 2);
-        snprintf(subtopic, sizeof(subtopic), "%s/state",   prefix); pub(tp(subtopic), (int32_t)v.chargerState);
-    }
-    pub(tp("victron/total_pv_w"), victronBleGetTotalPvPower(), 0);
-
     s_publishCount++;
     s_lastPublishMs  = millis();
     s_publishPending = false;
@@ -118,12 +96,7 @@ static void beginConnect() {
     }
 
     if (configGetMqttTlsEnabled()) {
-        // Tear down previous instance first to free memory before allocating new one
-        if (s_wifiClientSecure) {
-            delete s_wifiClientSecure;
-            s_wifiClientSecure = nullptr;
-        }
-        Serial.printf("[MQTT] Free heap before TLS alloc: %lu\n", ESP.getFreeHeap());
+        if (s_wifiClientSecure) { delete s_wifiClientSecure; s_wifiClientSecure = nullptr; }
         s_wifiClientSecure = new WiFiClientSecure();
         if (!s_wifiClientSecure) {
             Serial.println("[MQTT] Failed to allocate WiFiClientSecure");
@@ -131,25 +104,20 @@ static void beginConnect() {
             s_lastConnectMs = millis();
             return;
         }
-        configGetMqttCaCert(s_caCert, sizeof(s_caCert));
-        if (strlen(s_caCert) > 0) {
+        configGetMqttCaCert(s_caCert, (uint16_t)sizeof(s_caCert));
+        if (strlen(s_caCert) > 0)
             s_wifiClientSecure->setCACert(s_caCert);
-        } else {
+        else
             s_wifiClientSecure->setInsecure();
-        }
         s_mqtt.setClient(*s_wifiClientSecure);
     } else {
-        // Free the secure client if TLS was previously used
-        if (s_wifiClientSecure) {
-            delete s_wifiClientSecure;
-            s_wifiClientSecure = nullptr;
-        }
+        if (s_wifiClientSecure) { delete s_wifiClientSecure; s_wifiClientSecure = nullptr; }
         s_mqtt.setClient(s_wifiClient);
     }
 
     s_mqtt.setServer(srv, configGetMqttPort());
     s_mqtt.setKeepAlive(60);
-    s_mqtt.setSocketTimeout(10);   // TLS handshake needs more time
+    s_mqtt.setSocketTimeout(10);
 
     const char* user = strlen(configGetMqttUsername()) > 0 ? configGetMqttUsername() : nullptr;
     const char* pass = strlen(configGetMqttPassword()) > 0 ? configGetMqttPassword() : nullptr;
@@ -206,10 +174,7 @@ void mqttTask() {
 
 void mqttApplyConfig() {
     if (s_mqtt.connected()) s_mqtt.disconnect();
-    if (s_wifiClientSecure) {
-        delete s_wifiClientSecure;
-        s_wifiClientSecure = nullptr;
-    }
+    if (s_wifiClientSecure) { delete s_wifiClientSecure; s_wifiClientSecure = nullptr; }
     s_state = (!configGetMqttEnabled() || !serverConfigured())
               ? MqttState::MQTT_DISABLED : MqttState::WAITING_FOR_WIFI;
     s_lastConnectMs = 0;
