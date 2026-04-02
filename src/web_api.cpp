@@ -547,12 +547,31 @@ static void handleSaveWifi() {
     uint8_t cnt = 0;
     for (JsonObject p : doc["profiles"].as<JsonArray>()) {
         if (cnt >= MAX_WIFI_PROFILES) break;
-        configSetWifiProfile(cnt++, p["ssid"] | "", p["pass"] | "");
+        const char* ssid = p["ssid"] | "";
+        const char* pass = p["pass"] | "";
+        // Only update password if one was actually supplied
+        if (strlen(pass) > 0) {
+            configSetWifiProfile(cnt++, ssid, pass);
+        } else {
+            // Keep existing password for this slot
+            const char* existingPass = (cnt < configGetWifiProfileCount())
+                ? configGetWifiProfile(cnt).password : "";
+            configSetWifiProfile(cnt++, ssid, existingPass);
+        }
     }
     configSetWifiProfileCount(cnt);
     configSetApEnabled(doc["ap_enabled"] | false);
     configSetApSsid(doc["ap_ssid"] | "");
-    configSetApPassword(doc["ap_pass"] | "");
+    // Only overwrite AP password if a new one was supplied
+    const char* newApPass = doc["ap_pass"] | "";
+    if (strlen(newApPass) > 0) configSetApPassword(newApPass);
+
+
+    for (JsonObject p : doc["profiles"].as<JsonArray>()) {
+        if (cnt >= MAX_WIFI_PROFILES) break;
+        configSetWifiProfile(cnt++, p["ssid"] | "", p["pass"] | "");
+    }
+
     configSave();
     wifiApplyConfig();
     sendJson("{\"ok\":true}");
@@ -567,7 +586,12 @@ static void handleSaveVictron() {
     uint8_t cnt = 0;
     for (JsonObject d : doc["devices"].as<JsonArray>()) {
         if (cnt >= MAX_VICTRON_DEVICES) break;
-        configSetVictronDevice(cnt++, d["name"]|"", d["mac"]|"", d["key"]|"", d["enabled"]|true);
+        const char* key = d["key"] | "";
+        // If key is blank, preserve the existing key for this slot
+        if (strlen(key) == 0 && cnt < configGetVictronCount()) {
+            key = configGetVictronDevice(cnt).aesKey;
+        }
+        configSetVictronDevice(cnt++, d["name"]|"", d["mac"]|"", key, d["enabled"]|true);
     }
     configSetVictronCount(cnt);
     configSave();
