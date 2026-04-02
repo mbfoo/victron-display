@@ -88,6 +88,8 @@ static lv_obj_t* s_sysIp     = nullptr;
 static lv_obj_t* s_sysMqtt   = nullptr;
 static lv_obj_t* s_sysUptime = nullptr;
 static lv_obj_t* s_swAp      = nullptr;
+static lv_obj_t* s_sysApSsid = nullptr;
+static lv_obj_t* s_sysApPass = nullptr;
 static lv_obj_t* s_sliderBl  = nullptr;
 static lv_obj_t* s_ddTimeout = nullptr;
 
@@ -310,8 +312,44 @@ static void buildUi() {
     lv_obj_t* rowAp = makeSettingsRow(tabSys, 176, 54, "WiFi AP mode");
     s_swAp = makeSwitch(rowAp, 260, 14, cbApSwitch);
 
+    // AP credentials info row (only meaningful when AP is enabled)
+    lv_obj_t* rowApCreds = lv_obj_create(tabSys);
+    lv_obj_set_pos(rowApCreds, 0, 230);
+    lv_obj_set_size(rowApCreds, 320, 44);
+    lv_obj_set_style_bg_color(rowApCreds, C(COL_BG), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(rowApCreds, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(rowApCreds, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_side(rowApCreds, LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+    lv_obj_set_style_border_color(rowApCreds, C(COL_BORDER), LV_PART_MAIN);
+    lv_obj_set_style_border_width(rowApCreds, 1, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(rowApCreds, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(rowApCreds, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* apSsidKey = lv_label_create(rowApCreds);
+    lv_obj_set_pos(apSsidKey, 12, 4);
+    lv_label_set_text(apSsidKey, "AP SSID / Password");
+    lv_obj_set_style_text_color(apSsidKey, C(COL_MUTED), LV_PART_MAIN);
+    lv_obj_set_style_text_font(apSsidKey, &montserrat_12_1bpp, LV_PART_MAIN);
+
+    s_sysApSsid = lv_label_create(rowApCreds);
+    lv_obj_set_pos(s_sysApSsid, 12, 20);
+    lv_obj_set_size(s_sysApSsid, 180, 22);
+    lv_label_set_long_mode(s_sysApSsid, LV_LABEL_LONG_CLIP);
+    lv_label_set_text(s_sysApSsid, "--");
+    lv_obj_set_style_text_color(s_sysApSsid, C(COL_TEXT), LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_sysApSsid, &montserrat_16_1bpp, LV_PART_MAIN);
+
+    s_sysApPass = lv_label_create(rowApCreds);
+    lv_obj_set_pos(s_sysApPass, 200, 20);
+    lv_obj_set_size(s_sysApPass, 116, 22);
+    lv_label_set_long_mode(s_sysApPass, LV_LABEL_LONG_CLIP);
+    lv_label_set_text(s_sysApPass, "--");
+    lv_obj_set_style_text_color(s_sysApPass, C(COL_MUTED), LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_sysApPass, &montserrat_16_1bpp, LV_PART_MAIN);
+
+
     // Backlight slider row (identical to original SET tab row)
-    lv_obj_t* rowBl = makeSettingsRow(tabSys, 230, 54, "Backlight");
+    lv_obj_t* rowBl = makeSettingsRow(tabSys, 274, 54, "Backlight");
     s_sliderBl = lv_slider_create(rowBl);
     lv_obj_set_pos(s_sliderBl, 136, 17);
     lv_obj_set_size(s_sliderBl, 150, 20);
@@ -325,7 +363,7 @@ static void buildUi() {
     lv_obj_add_event_cb(s_sliderBl, cbBacklightSlider, LV_EVENT_VALUE_CHANGED, nullptr);
 
     // Display timeout dropdown row
-    lv_obj_t* rowTo = makeSettingsRow(tabSys, 284, 54, "Screen off");
+    lv_obj_t* rowTo = makeSettingsRow(tabSys, 328, 54, "Screen off");
     s_ddTimeout = lv_dropdown_create(rowTo);
     lv_obj_set_pos(s_ddTimeout, 180, 10);
     lv_obj_set_size(s_ddTimeout, 132, 40);
@@ -559,6 +597,18 @@ static void updateSysTab() {
              (unsigned long)m, (unsigned long)s);
     lv_label_set_text(s_sysUptime, buf);
     lv_obj_set_style_text_color(s_sysUptime, C(COL_TEXT), LV_PART_MAIN);
+
+    if (s_sysApSsid && s_sysApPass) {
+        const char* apSsid = configGetApSsid();
+        const char* apPass = configGetApPassword();
+        lv_label_set_text(s_sysApSsid,
+            (apSsid && apSsid[0]) ? apSsid : "(not set)");
+        lv_label_set_text(s_sysApPass,
+            (apPass && apPass[0]) ? apPass : "(no pw)");
+        lv_color_t c = configGetApEnabled() ? C(COL_TEXT) : C(COL_MUTED);
+        lv_obj_set_style_text_color(s_sysApSsid, c, LV_PART_MAIN);
+        lv_obj_set_style_text_color(s_sysApPass, c, LV_PART_MAIN);
+    }
 }
 
 static void updateDetailTab() {
