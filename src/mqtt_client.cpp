@@ -77,7 +77,7 @@ static void publishAll() {
 
     pub(tp("wifi/rssi_dbm"),   (int32_t)wifiGetRssi());
     pub(tp("wifi/uptime_s"),   wifiGetUptime());
-    pub(tp("wifi/ip"),         wifiGetIp());
+    pub(tp("wifi/ip"),         wifiGetIp().c_str());
     pub(tp("mcu/uptime_s"),    millis() / 1000UL);
     pub(tp("mcu/free_heap_b"), (uint32_t)ESP.getFreeHeap());
     pub(tp("status"),          "online", true);
