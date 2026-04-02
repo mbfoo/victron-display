@@ -576,6 +576,11 @@ static void updateSysTab() {
         lv_obj_set_style_text_color(s_sysWifi, C(COL_GREEN), LV_PART_MAIN);
         lv_label_set_text(s_sysIp, wifiGetIp().c_str());
         lv_obj_set_style_text_color(s_sysIp, C(COL_TEXT), LV_PART_MAIN);
+    } else if (wifiIsAp()) {
+        lv_label_set_text(s_sysWifi, "AP mode");
+        lv_obj_set_style_text_color(s_sysWifi, C(COL_ORANGE), LV_PART_MAIN);
+        lv_label_set_text(s_sysIp, wifiGetApIp().c_str());
+        lv_obj_set_style_text_color(s_sysIp, C(COL_TEXT), LV_PART_MAIN);
     } else {
         lv_label_set_text(s_sysWifi, "disconnected");
         lv_obj_set_style_text_color(s_sysWifi, C(COL_RED), LV_PART_MAIN);
