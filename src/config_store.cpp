@@ -4,7 +4,7 @@
 #include <string.h>
 #include <Arduino.h>
 
-#define EEPROM_SIZE (sizeof(ConfigData))
+#define EEPROM_SIZE (sizeof(ConfigData) + MQTT_CA_CERT_MAX_LEN)
 static ConfigData s_cfg;
 
 static void applyDefaults() {
@@ -25,6 +25,15 @@ static void applyDefaults() {
     s_cfg.mqttPort     = 1883;
     s_cfg.mqttInterval = 30;
     s_cfg.mqttEnabled  = false;
+
+    s_cfg.mqttTlsEnabled = false;
+    memset(s_cfg.mqttUsername, 0, sizeof(s_cfg.mqttUsername));
+    memset(s_cfg.mqttPassword, 0, sizeof(s_cfg.mqttPassword));
+    // Clear CA cert region in EEPROM
+    {
+        char empty[MQTT_CA_CERT_MAX_LEN] = {};
+        EEPROM.put(MQTT_CA_CERT_EEPROM_OFFSET, empty);
+    }
 
     s_cfg.backlightPct   = CONFIG_BACKLIGHT_PCT;
     s_cfg.displayTimeout = 600;
@@ -49,6 +58,8 @@ void configInit() {
         s_cfg.apPassword[sizeof(s_cfg.apPassword)-1] = 0;
         s_cfg.mqttServer[sizeof(s_cfg.mqttServer)-1] = 0;
         s_cfg.mqttTopic[sizeof(s_cfg.mqttTopic)-1]   = 0;
+        s_cfg.mqttUsername[sizeof(s_cfg.mqttUsername)-1] = 0;
+        s_cfg.mqttPassword[sizeof(s_cfg.mqttPassword)-1] = 0;
         for (uint8_t i = 0; i < MAX_VICTRON_DEVICES; i++) {
             s_cfg.victronDevices[i].name[VICTRON_NAME_LEN-1]  = 0;
             s_cfg.victronDevices[i].mac[VICTRON_MAC_LEN-1]    = 0;
@@ -78,10 +89,11 @@ void configPrint() {
                       s_cfg.victronDevices[i].name,
                       s_cfg.victronDevices[i].mac,
                       s_cfg.victronDevices[i].enabled);
-    Serial.printf("  MQTT: %s server=%s topic=%s port=%d ivl=%ds\n",
+    Serial.printf("  MQTT: %s server=%s topic=%s port=%d ivl=%ds tls=%s\n",
                   s_cfg.mqttEnabled ? "ON" : "OFF",
                   s_cfg.mqttServer, s_cfg.mqttTopic,
-                  s_cfg.mqttPort, s_cfg.mqttInterval);
+                  s_cfg.mqttPort, s_cfg.mqttInterval,
+                  s_cfg.mqttTlsEnabled ? "YES" : "NO");
     Serial.println("==============");
 }
 
@@ -153,6 +165,33 @@ void     configSetMqttInterval(uint16_t v) {
 }
 bool configGetMqttEnabled()                { return s_cfg.mqttEnabled; }
 void configSetMqttEnabled(bool v)          { s_cfg.mqttEnabled = v; }
+
+bool        configGetMqttTlsEnabled()      { return s_cfg.mqttTlsEnabled; }
+void        configSetMqttTlsEnabled(bool v){ s_cfg.mqttTlsEnabled = v; }
+const char* configGetMqttUsername()        { return s_cfg.mqttUsername; }
+void        configSetMqttUsername(const char* v) {
+    strncpy(s_cfg.mqttUsername, v ? v : "", sizeof(s_cfg.mqttUsername)-1);
+    s_cfg.mqttUsername[sizeof(s_cfg.mqttUsername)-1] = 0;
+}
+const char* configGetMqttPassword()        { return s_cfg.mqttPassword; }
+void        configSetMqttPassword(const char* v) {
+    strncpy(s_cfg.mqttPassword, v ? v : "", sizeof(s_cfg.mqttPassword)-1);
+    s_cfg.mqttPassword[sizeof(s_cfg.mqttPassword)-1] = 0;
+}
+void configGetMqttCaCert(char* buf, size_t bufLen) {
+    size_t n = (bufLen < MQTT_CA_CERT_MAX_LEN) ? bufLen : MQTT_CA_CERT_MAX_LEN;
+    for (size_t i = 0; i < n; i++)
+        buf[i] = EEPROM.read(MQTT_CA_CERT_EEPROM_OFFSET + i);
+    buf[n - 1] = '\0';
+}
+void configSetMqttCaCert(const char* pem) {
+    size_t n = strlen(pem);
+    if (n >= MQTT_CA_CERT_MAX_LEN) n = MQTT_CA_CERT_MAX_LEN - 1;
+    for (size_t i = 0; i < n; i++)
+        EEPROM.write(MQTT_CA_CERT_EEPROM_OFFSET + i, pem[i]);
+    EEPROM.write(MQTT_CA_CERT_EEPROM_OFFSET + n, 0);
+    EEPROM.commit();
+}
 
 uint8_t  configGetBacklight()              { return s_cfg.backlightPct; }
 void     configSetBacklight(uint8_t v)     {

@@ -6,7 +6,7 @@
  * GET  /api/data     JSON live + config data used by both pages
  * POST /api/wifi     save WiFi profiles + AP settings
  * POST /api/victron  save Victron device config (MAC + AES key)
- * POST /api/mqtt     save MQTT settings
+ * POST /api/mqtt     save MQTT settings (incl. TLS, username, password, CA cert)
  * POST /api/display  save display settings
  * POST /api/reboot   reboot ESP
  */
@@ -143,19 +143,16 @@ function fetchData(){
     list.innerHTML='';
     d.devices.forEach((dev,i)=>{
       const on=dev.valid;
-      // Metrics: show real values if online, dashes if offline
       const pvVal   = on ? dev.pv_power_w.toFixed(0)+' W'        : '—';
       const batVal  = on ? dev.battery_voltage_v.toFixed(2)+' V'  : '—';
       const curVal  = on ? dev.battery_current_a.toFixed(1)+' A'  : '—';
       const yldVal  = on ? dev.yield_today_kwh.toFixed(2)+' kWh'  : '—';
       const rssiVal = on ? dev.rssi+' dBm'                        : '—';
 
-      // Header badge: Offline pill when disconnected, state badge when online
       const headerBadge = on
         ? `<span class="badge ${stateClass(dev.charger_state)}">${stateName(dev.charger_state)}</span>`
         : `<span class="badge badge-offline">&#9679; Offline</span>`;
 
-      // Bottom bar / offline notice
       const bottomSection = on
         ? `<div class="state-bar">
              <span>Yield today: ${yldVal}</span>
@@ -202,7 +199,7 @@ setInterval(fetchData,5000);
 )rawhtml";
 
 // ─────────────────────────────────────────────────────────────────────────
-// Config HTML  (unchanged from original)
+// Config HTML
 // ─────────────────────────────────────────────────────────────────────────
 static const char CONFIG_HTML[] PROGMEM = R"rawhtml(
 <!DOCTYPE html>
@@ -225,9 +222,10 @@ static const char CONFIG_HTML[] PROGMEM = R"rawhtml(
     padding-bottom:.5rem}
   .form-row{margin-bottom:.75rem}
   label{display:block;font-size:.8rem;color:#aaa;margin-bottom:.25rem}
-  input,select{width:100%;background:#0f3460;border:1px solid #1e3a5f;border-radius:6px;
+  input,select,textarea{width:100%;background:#0f3460;border:1px solid #1e3a5f;border-radius:6px;
     padding:.5rem .75rem;color:#eee;font-size:.9rem}
-  input:focus{outline:none;border-color:#e94560}
+  textarea{font-family:monospace;font-size:.8rem;resize:vertical}
+  input:focus,textarea:focus{outline:none;border-color:#e94560}
   .btn{background:#e94560;color:#fff;border:none;border-radius:6px;padding:.5rem 1.2rem;
     cursor:pointer;font-size:.9rem;margin-top:.5rem}
   .btn:hover{background:#c73652}
@@ -241,6 +239,7 @@ static const char CONFIG_HTML[] PROGMEM = R"rawhtml(
   .cb-row input{width:auto}
   .toast{position:fixed;bottom:1rem;right:1rem;background:#0d7a3e;color:#fff;
     padding:.75rem 1.25rem;border-radius:8px;display:none;font-size:.9rem;z-index:999}
+  .hint{font-size:.75rem;color:#6b7280;margin-top:.25rem}
   @media(max-width:480px){.grid2{grid-template-columns:1fr}}
 </style>
 </head>
@@ -288,6 +287,21 @@ static const char CONFIG_HTML[] PROGMEM = R"rawhtml(
     <div class="form-row"><label>Port</label><input id="mqtt-port" type="number" value="1883"></div>
     <div class="form-row"><label>Topic base</label><input id="mqtt-topic" placeholder="victron"></div>
     <div class="form-row"><label>Publish interval (s)</label><input id="mqtt-interval" type="number" value="30"></div>
+    <div class="form-row"><label>Username (optional)</label><input id="mqtt-user" autocomplete="off"></div>
+    <div class="form-row"><label>Password (optional)</label>
+      <input id="mqtt-pass" type="password" placeholder="leave blank to keep current" autocomplete="new-password"></div>
+  </div>
+  <div class="cb-row" style="margin-top:.5rem">
+    <input type="checkbox" id="mqtt-tls" onchange="document.getElementById('tls-extra').style.display=this.checked?'':'none'">
+    <label for="mqtt-tls" style="margin:0">Enable TLS / MQTTS (port 8883)</label>
+  </div>
+  <div id="tls-extra" style="display:none;margin-top:.75rem;background:#0f3460;border-radius:8px;padding:1rem">
+    <div class="form-row">
+      <label>CA Certificate (PEM) — leave empty to skip server verification</label>
+      <textarea id="mqtt-ca" rows="7"
+        placeholder="-----BEGIN CERTIFICATE-----&#10;MIIDxTCCAq2gAwIBAgIQ...&#10;-----END CERTIFICATE-----"></textarea>
+      <div class="hint" id="ca-status"></div>
+    </div>
   </div>
   <button class="btn" onclick="saveMqtt()">Save MQTT</button>
 </div>
@@ -386,13 +400,18 @@ function saveVictron(){
 }
 
 function saveMqtt(){
+  const tlsOn=document.getElementById('mqtt-tls').checked;
   fetch('/api/mqtt',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({
-      server:document.getElementById('mqtt-server').value,
-      port:+document.getElementById('mqtt-port').value,
-      topic:document.getElementById('mqtt-topic').value,
+      server:  document.getElementById('mqtt-server').value,
+      port:   +document.getElementById('mqtt-port').value,
+      topic:   document.getElementById('mqtt-topic').value,
       interval:+document.getElementById('mqtt-interval').value,
-      enabled:document.getElementById('mqtt-enabled').checked
+      enabled: document.getElementById('mqtt-enabled').checked,
+      tls_enabled: tlsOn,
+      username: document.getElementById('mqtt-user').value,
+      password: document.getElementById('mqtt-pass').value,
+      ca_cert:  tlsOn ? document.getElementById('mqtt-ca').value : ''
     })}).then(r=>r.json()).then(d=>showToast(d.ok?'MQTT saved!':'Error: '+d.err,d.ok));
 }
 
@@ -424,6 +443,13 @@ fetch('/api/data').then(r=>r.json()).then(d=>{
   document.getElementById('mqtt-topic').value=mc.topic||'victron';
   document.getElementById('mqtt-interval').value=mc.interval||30;
   document.getElementById('mqtt-enabled').checked=!!mc.enabled;
+  document.getElementById('mqtt-tls').checked=!!mc.tls_enabled;
+  document.getElementById('mqtt-user').value=mc.username||'';
+  if(mc.tls_enabled) document.getElementById('tls-extra').style.display='';
+  const caStatus=document.getElementById('ca-status');
+  caStatus.textContent=mc.has_ca_cert
+    ? '\u2714 CA cert stored — paste a new PEM to replace, or save empty to clear'
+    : 'No CA cert stored — leave empty to skip server verification (insecure)';
 
   const dc=d.display||{};
   document.getElementById('brightness').value=dc.brightness||80;
@@ -490,11 +516,19 @@ static void handleApiData() {
     }
 
     JsonObject mc = doc.createNestedObject("mqtt_cfg");
-    mc["server"]   = configGetMqttServer();
-    mc["port"]     = configGetMqttPort();
-    mc["topic"]    = configGetMqttTopic();
-    mc["interval"] = configGetMqttInterval();
-    mc["enabled"]  = configGetMqttEnabled();
+    mc["server"]      = configGetMqttServer();
+    mc["port"]        = configGetMqttPort();
+    mc["topic"]       = configGetMqttTopic();
+    mc["interval"]    = configGetMqttInterval();
+    mc["enabled"]     = configGetMqttEnabled();
+    mc["tls_enabled"] = configGetMqttTlsEnabled();
+    mc["username"]    = configGetMqttUsername();
+    // Never send the password back — send a boolean instead
+    mc["has_password"] = strlen(configGetMqttPassword()) > 0;
+    // Indicate if a CA cert is stored
+    char certPeek[8];
+    configGetMqttCaCert(certPeek, sizeof(certPeek));
+    mc["has_ca_cert"] = strlen(certPeek) > 0;
 
     JsonObject dc = doc.createNestedObject("display");
     dc["brightness"] = configGetBacklight();
@@ -513,12 +547,31 @@ static void handleSaveWifi() {
     uint8_t cnt = 0;
     for (JsonObject p : doc["profiles"].as<JsonArray>()) {
         if (cnt >= MAX_WIFI_PROFILES) break;
-        configSetWifiProfile(cnt++, p["ssid"] | "", p["pass"] | "");
+        const char* ssid = p["ssid"] | "";
+        const char* pass = p["pass"] | "";
+        // Only update password if one was actually supplied
+        if (strlen(pass) > 0) {
+            configSetWifiProfile(cnt++, ssid, pass);
+        } else {
+            // Keep existing password for this slot
+            const char* existingPass = (cnt < configGetWifiProfileCount())
+                ? configGetWifiProfile(cnt).password : "";
+            configSetWifiProfile(cnt++, ssid, existingPass);
+        }
     }
     configSetWifiProfileCount(cnt);
     configSetApEnabled(doc["ap_enabled"] | false);
     configSetApSsid(doc["ap_ssid"] | "");
-    configSetApPassword(doc["ap_pass"] | "");
+    // Only overwrite AP password if a new one was supplied
+    const char* newApPass = doc["ap_pass"] | "";
+    if (strlen(newApPass) > 0) configSetApPassword(newApPass);
+
+
+    for (JsonObject p : doc["profiles"].as<JsonArray>()) {
+        if (cnt >= MAX_WIFI_PROFILES) break;
+        configSetWifiProfile(cnt++, p["ssid"] | "", p["pass"] | "");
+    }
+
     configSave();
     wifiApplyConfig();
     sendJson("{\"ok\":true}");
@@ -533,7 +586,12 @@ static void handleSaveVictron() {
     uint8_t cnt = 0;
     for (JsonObject d : doc["devices"].as<JsonArray>()) {
         if (cnt >= MAX_VICTRON_DEVICES) break;
-        configSetVictronDevice(cnt++, d["name"]|"", d["mac"]|"", d["key"]|"", d["enabled"]|true);
+        const char* key = d["key"] | "";
+        // If key is blank, preserve the existing key for this slot
+        if (strlen(key) == 0 && cnt < configGetVictronCount()) {
+            key = configGetVictronDevice(cnt).aesKey;
+        }
+        configSetVictronDevice(cnt++, d["name"]|"", d["mac"]|"", key, d["enabled"]|true);
     }
     configSetVictronCount(cnt);
     configSave();
@@ -543,7 +601,7 @@ static void handleSaveVictron() {
 
 static void handleSaveMqtt() {
     if (!s_server->hasArg("plain")) { sendJson("{\"ok\":false,\"err\":\"no body\"}"); return; }
-    DynamicJsonDocument doc(512);
+    DynamicJsonDocument doc(4096);  // larger to accommodate CA cert PEM
     if (deserializeJson(doc, s_server->arg("plain"))) {
         sendJson("{\"ok\":false,\"err\":\"json\"}"); return;
     }
@@ -552,6 +610,13 @@ static void handleSaveMqtt() {
     configSetMqttTopic(doc["topic"]      | "victron");
     configSetMqttInterval(doc["interval"]| 30);
     configSetMqttEnabled(doc["enabled"]  | false);
+    configSetMqttTlsEnabled(doc["tls_enabled"] | false);
+    if (doc.containsKey("username")) configSetMqttUsername(doc["username"] | "");
+    // Only update password if a non-empty value was supplied
+    const char* newPass = doc["password"] | "";
+    if (strlen(newPass) > 0) configSetMqttPassword(newPass);
+    // Update CA cert (empty string clears it)
+    if (doc.containsKey("ca_cert")) configSetMqttCaCert(doc["ca_cert"] | "");
     configSave();
     mqttApplyConfig();
     sendJson("{\"ok\":true}");
