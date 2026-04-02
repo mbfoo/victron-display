@@ -277,33 +277,20 @@ static const char CONFIG_HTML[] PROGMEM = R"rawhtml(
   <br><button class="btn" onclick="saveVictron()" style="margin-top:.75rem">Save Devices</button>
 </div>
 
- <div class="section">
-   <h2>MQTT</h2>
-   <div class="cb-row" ...><input type="checkbox" id="mqtt-enabled"> Enable MQTT</div>
-   <div class="grid2">
-     <div class="form-row"><label>Broker host / IP</label><input id="mqtt-server"></div>
-     <div class="form-row"><label>Port</label><input id="mqtt-port" type="number"></div>
-     <div class="form-row"><label>Topic base</label><input id="mqtt-topic"></div>
-     <div class="form-row"><label>Publish interval (s)</label><input id="mqtt-interval"></div>
-    <div class="form-row"><label>Username (optional)</label><input id="mqtt-user"></div>
-    <div class="form-row"><label>Password (optional)</label>
-      <input id="mqtt-pass" type="password" placeholder="leave blank to keep"></div>
+<div class="section">
+  <h2>MQTT</h2>
+  <div class="cb-row" style="margin-bottom:.75rem">
+    <input type="checkbox" id="mqtt-enabled">
+    <label for="mqtt-enabled" style="margin:0">Enable MQTT</label>
   </div>
-  <div class="cb-row" style="margin-top:.5rem">
-    <input type="checkbox" id="mqtt-tls">
-    <label for="mqtt-tls" style="margin:0">Enable TLS / MQTTS</label>
+  <div class="grid2">
+    <div class="form-row"><label>Broker host / IP</label><input id="mqtt-server" placeholder="192.168.1.10"></div>
+    <div class="form-row"><label>Port</label><input id="mqtt-port" type="number" value="1883"></div>
+    <div class="form-row"><label>Topic base</label><input id="mqtt-topic" placeholder="victron"></div>
+    <div class="form-row"><label>Publish interval (s)</label><input id="mqtt-interval" type="number" value="30"></div>
   </div>
-  <div id="tls-extra" style="display:none;margin-top:.5rem">
-    <div class="form-row">
-      <label>CA Certificate (PEM, optional – leave empty to skip verification)</label>
-      <textarea id="mqtt-ca" rows="6" style="width:100%;background:#0f3460;border:1px solid
-        #1e3a5f;border-radius:6px;padding:.5rem;color:#eee;font-size:.8rem;font-family:monospace"
-        placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"></textarea>
-      <span id="ca-status" style="font-size:.75rem;color:#aaa"></span>
-    </div>
-  </div>
-   <button class="btn" onclick="saveMqtt()">Save MQTT</button>
- </div>
+  <button class="btn" onclick="saveMqtt()">Save MQTT</button>
+</div>
 
 <div class="section">
   <h2>Display (Waveshare ESP32-C6 Touch 1.47")</h2>
@@ -399,18 +386,13 @@ function saveVictron(){
 }
 
 function saveMqtt(){
-  const tlsOn = document.getElementById('mqtt-tls').checked;
   fetch('/api/mqtt',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({
       server:document.getElementById('mqtt-server').value,
       port:+document.getElementById('mqtt-port').value,
       topic:document.getElementById('mqtt-topic').value,
       interval:+document.getElementById('mqtt-interval').value,
-      enabled:document.getElementById('mqtt-enabled').checked,
-      tls_enabled: tlsOn,
-      username: document.getElementById('mqtt-user').value,
-      password: document.getElementById('mqtt-pass').value,
-      ca_cert: tlsOn ? document.getElementById('mqtt-ca').value : ''
+      enabled:document.getElementById('mqtt-enabled').checked
     })}).then(r=>r.json()).then(d=>showToast(d.ok?'MQTT saved!':'Error: '+d.err,d.ok));
 }
 
@@ -442,14 +424,6 @@ fetch('/api/data').then(r=>r.json()).then(d=>{
   document.getElementById('mqtt-topic').value=mc.topic||'victron';
   document.getElementById('mqtt-interval').value=mc.interval||30;
   document.getElementById('mqtt-enabled').checked=!!mc.enabled;
-  document.getElementById('mqtt-tls').checked=!!mc.tls_enabled;
-  document.getElementById('mqtt-user').value=mc.username||'';
-  const caStatus=document.getElementById('ca-status');
-  caStatus.textContent=mc.has_ca_cert?'✔ CA cert stored (clear by saving empty)':'No CA cert stored';
-  if(mc.tls_enabled) document.getElementById('tls-extra').style.display='';
-  document.getElementById('mqtt-tls').onchange=function(){
-    document.getElementById('tls-extra').style.display=this.checked?'':'none';
-  };
 
   const dc=d.display||{};
   document.getElementById('brightness').value=dc.brightness||80;
@@ -521,12 +495,6 @@ static void handleApiData() {
     mc["topic"]    = configGetMqttTopic();
     mc["interval"] = configGetMqttInterval();
     mc["enabled"]  = configGetMqttEnabled();
-    mc["tls_enabled"]   = configGetMqttTlsEnabled();
-    mc["username"]      = configGetMqttUsername();
-    mc["has_password"]  = strlen(configGetMqttPassword()) > 0;
-    // Check if a CA cert is stored
-    char certPeek[8]; configGetMqttCaCert(certPeek, sizeof(certPeek));
-    mc["has_ca_cert"]   = strlen(certPeek) > 0;
 
     JsonObject dc = doc.createNestedObject("display");
     dc["brightness"] = configGetBacklight();
@@ -584,11 +552,6 @@ static void handleSaveMqtt() {
     configSetMqttTopic(doc["topic"]      | "victron");
     configSetMqttInterval(doc["interval"]| 30);
     configSetMqttEnabled(doc["enabled"]  | false);
-    configSetMqttTlsEnabled(doc["tls_enabled"] | false);
-    if (doc.containsKey("username")) configSetMqttUsername(doc["username"] | "");
-    String newPass = doc["password"] | "";
-    if (newPass.length() > 0) configSetMqttPassword(newPass.c_str());
-    if (doc.containsKey("ca_cert")) configSetMqttCaCert(doc["ca_cert"] | "");
     configSave();
     mqttApplyConfig();
     sendJson("{\"ok\":true}");
