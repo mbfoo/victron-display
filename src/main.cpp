@@ -12,7 +12,8 @@
 #include "mqtt_client.h"
 #include "web_server.h"
 #include "watchdog.h"
-#include "display.h"    // stubs only
+#include "display.h"
+#include "display_timeout.h"
 
 void setup() {
     Serial.begin(115200);
@@ -23,6 +24,7 @@ void setup() {
     configPrint();
 
     displayInit();
+    displayTimeoutInit();
 
     watchdogInit();
 
@@ -46,6 +48,7 @@ void loop() {
     mqttTask();
 
     displayTask();
+    displayTimeoutTask();
 
     static uint32_t lastPrint = 0;
     if (millis() - lastPrint >= 30000) {
