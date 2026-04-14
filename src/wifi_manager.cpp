@@ -107,10 +107,19 @@ void wifiInit() {
     if (configGetApEnabled()) {
         WiFi.mode(WIFI_AP);
         delay(100);
-        WiFi.softAP(configGetApSsid(), configGetApPassword());
+        const char* apPass = configGetApPassword();
+        const char* apSsid = configGetApSsid();
+        Serial.printf("[WIFI] AP config: SSID='%s' PASS='%s' (len=%d)\n", 
+                      apSsid, apPass, strlen(apPass));
+        // Use explicit security setting (WIFI_AUTH_WPA2_PSK for WPA2)
+        bool success = WiFi.softAP(apSsid, apPass, 1, false, 4);
+        if (!success) {
+            Serial.printf("[WIFI] ERROR: Failed to start AP! Check password length (8-63 chars, must include non-numeric)\n");
+        }
         enterState(WifiState::AP);
-        Serial.printf("[WIFI] AP mode active SSID=%s IP=%s\n",
-            configGetApSsid(), WiFi.softAPIP().toString().c_str());
+        Serial.printf("[WIFI] AP mode %s SSID=%s IP=%s\n",
+            success ? "active" : "FAILED",
+            apSsid, WiFi.softAPIP().toString().c_str());
     } else {
         WiFi.mode(WIFI_STA);
         delay(100);
@@ -128,10 +137,19 @@ void wifiApplyConfig() {
         delay(50);
         WiFi.mode(WIFI_AP);
         delay(50);
-        WiFi.softAP(configGetApSsid(), configGetApPassword());
+        const char* apPass = configGetApPassword();
+        const char* apSsid = configGetApSsid();
+        Serial.printf("[WIFI] AP config: SSID='%s' PASS='%s' (len=%d)\n", 
+                      apSsid, apPass, strlen(apPass));
+        // Use explicit security setting (WIFI_AUTH_WPA2_PSK for WPA2)
+        bool success = WiFi.softAP(apSsid, apPass, 1, false, 4);
+        if (!success) {
+            Serial.printf("[WIFI] ERROR: Failed to start AP! Check password length (8-63 chars, must include non-numeric)\n");
+        }
         enterState(WifiState::AP);
-        Serial.printf("[WIFI] Switched to AP SSID=%s IP=%s\n",
-            configGetApSsid(), WiFi.softAPIP().toString().c_str());
+        Serial.printf("[WIFI] Switched to AP %s SSID=%s IP=%s\n",
+            success ? "active" : "FAILED",
+            apSsid, WiFi.softAPIP().toString().c_str());
     } else {
         WiFi.softAPdisconnect(true);
         delay(50);
@@ -235,10 +253,12 @@ void wifiReconnect() {
 
 void wifiPrint() {
     static const char* str[] = {"IDLE","CONNECTING","CONNECTED","WAITING_RETRY","AP"};
+    String ssid = wifiIsAp() ? configGetApSsid() : wifiGetSsid();
+    String ip = wifiIsAp() ? wifiGetApIp() : wifiGetIp();
     Serial.printf("\n[WIFI] %s SSID=%s IP=%s RSSI=%d Up=%lus\n",
                   str[(int)s_state],
-                  wifiGetSsid().c_str(),
-                  wifiGetIp().c_str(),
+                  ssid.c_str(),
+                  ip.c_str(),
                   wifiGetRssi(),
                   wifiGetUptime());
 }
