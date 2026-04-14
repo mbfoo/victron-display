@@ -566,12 +566,6 @@ static void handleSaveWifi() {
     const char* newApPass = doc["ap_pass"] | "";
     if (strlen(newApPass) > 0) configSetApPassword(newApPass);
 
-
-    for (JsonObject p : doc["profiles"].as<JsonArray>()) {
-        if (cnt >= MAX_WIFI_PROFILES) break;
-        configSetWifiProfile(cnt++, p["ssid"] | "", p["pass"] | "");
-    }
-
     configSave();
     wifiApplyConfig();
     sendJson("{\"ok\":true}");
